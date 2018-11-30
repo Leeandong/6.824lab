@@ -1,5 +1,19 @@
 package mapreduce
 
+import (
+	"encoding/json"
+	"log"
+	"os"
+	"sort"
+)
+
+type ByDict []KeyValue
+
+func (b ByDict) Len() int{ return len(b) }
+func (b ByDict) Swap(i, j int)    { b[i], b[j] = b[j], b[i] }
+func (b ByDict) Less(i, j int) bool { return b[i].Key < b[j].Key }
+
+
 func doReduce(
 	jobName string, // the name of the whole MapReduce job
 	reduceTask int, // which reduce task this is
@@ -7,6 +21,51 @@ func doReduce(
 	nMap int, // the number of map tasks that were run ("M" in the paper)
 	reduceF func(key string, values []string) string,
 ) {
+	var keyPair []KeyValue
+
+	for m:=0; m < nMap; m++{
+		srcfileName := reduceName(jobName, m, reduceTask)
+		srcfile, err := os.Open(srcfileName)
+		if err != nil{
+			log.Fatal(err)
+		}
+		var tmpKeyPair []KeyValue
+		enc := json.NewDecoder(srcfile)
+		err = enc.Decode(&tmpKeyPair)
+		if err != nil{
+			log.Fatal(err)
+		}
+		keyPair = append(keyPair, tmpKeyPair...)
+	}
+
+	sort.Sort(ByDict(keyPair))
+
+
+	dstFile, err := os.OpenFile(outFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY,0644)
+	if err != nil{
+		log.Fatal(err)
+	}
+	enc := json.NewEncoder(dstFile)
+	tmp := ""
+	var values []string
+	for _, kv := range keyPair{
+		if kv.Key == tmp{
+			values = append(values, kv.Value)
+		} else{
+			err = enc.Encode(KeyValue{kv.Key, reduceF(kv.Key, values)})
+			if err != nil{
+				log.Fatal(err)
+			}
+			values = nil
+		}
+		tmp = kv.Key
+	}
+	err = dstFile.Close()
+	if err != nil{
+		log.Fatal(err)
+	}
+
+
 	//
 	// doReduce manages one reduce task: it should read the intermediate
 	// files for the task, sort the intermediate key/value pairs by key,
