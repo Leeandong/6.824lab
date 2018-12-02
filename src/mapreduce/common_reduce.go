@@ -47,34 +47,27 @@ func doReduce(
 		log.Fatal(err)
 	}
 	enc := json.NewEncoder(dstFile)
+
 	tmp := keyPair[0].Key
 	var values []string
-	//for i := 0; i < len(keyPair); i++ {
-	//	if keyPair[i].Key == tmp {
-	//		values = append(values, keyPair[i].Value)
-	//	} else {
-	//		err = enc.Encode(KeyValue{keyPair[i].Key, reduceF(keyPair[i].Key, values)})
-	//		if err != nil {
-	//			log.Fatal(err)
-	//		}
-	//		values = nil
-	//		if i < len(keyPair)-1{
-	//			tmp = keyPair[i+1].Key
-	//		}
-	//	}
-	//}
-	for _, kv := range keyPair {
-		if kv.Key == tmp {
-			values = append(values, kv.Value)
+	for i := 0; i < len(keyPair); i++ {
+		if keyPair[i].Key == tmp {
+			values = append(values, keyPair[i].Value)
 		} else {
-			err = enc.Encode(KeyValue{kv.Key, reduceF(kv.Key, values)})
+			err = enc.Encode(KeyValue{tmp, reduceF(tmp, values)})
 			if err != nil {
 				log.Fatal(err)
 			}
 			values = nil
+			values = append(values, keyPair[i].Value)
+			tmp = keyPair[i].Key
 		}
-		tmp = kv.Key
 	}
+	err = enc.Encode(KeyValue{tmp, reduceF(tmp, values)})
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	err = dstFile.Close()
 	if err != nil {
 		log.Fatal(err)
