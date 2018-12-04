@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
-	"log"
 	"mapreduce"
 	"os"
 	"strconv"
@@ -18,19 +16,14 @@ import (
 // and look only at the contents argument. The return value is a slice
 // of key/value pairs.
 //
-func mapF(filename string, contents string) []mapreduce.KeyValue {
+func mapF(filename string, content string) []mapreduce.KeyValue {
 	// Your code here (Part II).
 	var keyPair []mapreduce.KeyValue
-	srcfile, err := ioutil.ReadFile(filename)
-	if err != nil {
-		log.Fatal(err)
-	}
-	content := string (srcfile)
 	f := func(c rune) bool {
 		return !unicode.IsLetter(c)
 	}
 	stringlist := strings.FieldsFunc(content, f)
-	for _, v := range stringlist{
+	for _, v := range stringlist {
 		keyPair = append(keyPair, mapreduce.KeyValue{v, "1"})
 	}
 	return keyPair
