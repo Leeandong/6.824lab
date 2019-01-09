@@ -17,13 +17,18 @@ package raft
 //   in the same server.
 //
 
-import "sync"
+import (
+	"log"
+	"math/rand"
+	"os"
+	"runtime"
+	"sync"
+	"time"
+)
 import "labrpc"
 
 // import "bytes"
 // import "labgob"
-
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -55,6 +60,19 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	term        int
+	isLeader    bool
+	voteFor     map[int]int
+	currentTerm int
+	logTerm     []int
+	leader      chan int
+	candidate   chan int
+	follower    chan int
+	timeout     *time.Timer
+	elapse      time.Duration
+	timing      chan int
+	state       int // 0 表示 follower， 1 表示 candidate, 2表示leader
+
 }
 
 // return currentTerm and whether this server
@@ -66,7 +84,6 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	return term, isleader
 }
-
 
 //
 // save Raft's persistent state to stable storage,
@@ -83,7 +100,6 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 }
-
 
 //
 // restore previously persisted state.
@@ -107,15 +123,16 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -124,6 +141,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int
+	VoteGranted bool
 }
 
 //
@@ -131,6 +150,18 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	reply.Term = rf.currentTerm
+	if rf.currentTerm < args.Term {
+		rf.currentTerm = args.Term
+	}
+	reply.VoteGranted = false
+	if len(rf.logTerm)-1 < args.LastLogIndex || (len(rf.logTerm)-1 == args.LastLogIndex && rf.logTerm[args.LastLogIndex] <= args.LastLogTerm) {
+		if val, ok := rf.voteFor[rf.currentTerm]; ok && val == args.CandidateId {
+			reply.VoteGranted = true
+			rf.voteFor[rf.currentTerm] = args.CandidateId
+		}
+	}
+
 }
 
 //
@@ -167,7 +198,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -188,7 +218,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -223,9 +252,177 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 
+	rf.follower = make(chan int, 0)
+	rf.candidate = make(chan int, 0)
+	rf.leader = make(chan int, 0)
+	rf.term = 0
+
+	file, err := os.OpenFile("info.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+	log.SetOutput(file)
+	log.Print("Logging to a file in Go!")
+
+	rf.state = 0
+	rf.isLeader = false
+	//f := func() {
+	//	select{
+	//	case <- rf.follower:{
+	//		//rf.mu.Lock()
+	//		//defer rf.mu.Unlock()
+	//		rf.timeout.Reset(rf.elapse)
+	//		rf.candidate <- 1
+	//	}
+	//	case <- rf.candidate:{
+	//		//rf.mu.Lock()
+	//		//defer rf.mu.Unlock()
+	//		rf.elapse = time.Duration(rand.Intn(200)+300) * time.Millisecond
+	//		rf.timeout.Reset(rf.elapse)
+	//		rf.candidate <- 1
+	//	}
+	//	case <- rf.leader:{
+	//		//rf.mu.Lock()
+	//		//defer rf.mu.Unlock()
+	//		rf.timeout.Reset(rf.elapse)
+	//		rf.leader <- 1
+	//	}
+	//	}
+	//	rf.timing <- 1
+	//}
+
+	fn := func() {
+		rf.timing <- 1
+		switch rf.state {
+		case 0:
+			{
+				rf.timeout.Reset(rf.elapse)
+				rf.candidate <- 1
+			}
+		case 1:
+			{
+				rf.elapse = time.Duration(rand.Intn(200)+300) * time.Millisecond
+				rf.timeout.Reset(rf.elapse)
+				rf.candidate <- 1
+			}
+		case 2:
+			{
+				rf.timeout.Reset(rf.elapse)
+				rf.leader <- 1
+			}
+		}
+	}
+
+	rf.elapse = time.Duration(rand.Intn(200)+300) * time.Millisecond
+	rf.timeout = time.AfterFunc(rf.elapse, fn)
+
+	go func() {
+		log.Print("waiting for the follower state")
+		<-rf.follower
+		rf.mu.Lock()
+		_, file, line, ok := runtime.Caller(0)
+		if ok {
+			log.Printf("lock in file: %s    line=%d\n", file, line)
+		}
+		rf.state = 0
+		rf.mu.Unlock()
+		_, file, line, ok = runtime.Caller(0)
+		if ok {
+			log.Printf("unlock in file: %s    line=%d\n", file, line)
+		}
+		<-rf.timing
+	}()
+
+	go func() {
+		<-rf.candidate
+		rf.mu.Lock()
+		_, file, line, ok := runtime.Caller(0)
+		if ok {
+			log.Printf("lock in file: %s    line=%d\n", file, line)
+		}
+		rf.state = 1
+		rf.isLeader = false
+		rf.mu.Unlock()
+		_, file, line, ok = runtime.Caller(0)
+		if ok {
+			log.Printf("unlock in file: %s    line=%d\n", file, line)
+		}
+		args := &RequestVoteArgs{rf.currentTerm, me, len(rf.logTerm), rf.logTerm[len(rf.logTerm)-1]}
+		reply := &RequestVoteReply{}
+		sum := make([]int, len(peers))
+		for i := 0; i < len(peers); i++ {
+			i := i
+			if i != me {
+				go func() {
+					rf.mu.Lock()
+					_, file, line, ok := runtime.Caller(0)
+					if ok {
+						log.Printf("lock in file: %s    line=%d\n", file, line)
+					}
+					if sum[i] != 1 {
+						if rf.sendRequestVote(i, args, reply) {
+							sum[i] = 1
+						} else {
+							if reply.Term > rf.currentTerm {
+								rf.follower <- 1
+								rf.timeout.Reset(0)
+							}
+						}
+					}
+					rf.mu.Unlock()
+					_, file, line, ok = runtime.Caller(0)
+					if ok {
+						log.Printf("unlock in file: %s    line=%d\n", file, line)
+					}
+				}()
+			}
+		}
+		go func() {
+			rf.mu.Lock()
+			_, file, line, ok := runtime.Caller(0)
+			if ok {
+				log.Printf("lock in file: %s    line=%d\n", file, line)
+			}
+			num := 0
+			for i := range sum {
+				num += i
+			}
+			if num > len(peers)/2 {
+				rf.timeout.Reset(0)
+				rf.leader <- 1
+			}
+			rf.mu.Unlock()
+			_, file, line, ok = runtime.Caller(0)
+			if ok {
+				log.Printf("unlock in file: %s    line=%d\n", file, line)
+			}
+		}()
+		<-rf.timing
+	}()
+
+	go func() {
+		<-rf.leader
+		rf.mu.Lock()
+		_, file, line, ok := runtime.Caller(0)
+		if ok {
+			log.Printf("lock in file: %s    line=%d\n", file, line)
+		}
+		rf.isLeader = true
+		rf.state = 2
+		rf.mu.Unlock()
+		_, file, line, ok = runtime.Caller(0)
+		if ok {
+			log.Printf("unlock in file: %s    line=%d\n", file, line)
+		}
+		<-rf.timing
+	}()
+
+	log.Print("rf.follower is waiting")
+	rf.follower <- 1
+	time.Sleep(5 * time.Second)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 
 	return rf
 }
