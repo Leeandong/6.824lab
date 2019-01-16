@@ -18,14 +18,12 @@ package raft
 //
 
 import (
+	"labrpc"
 	"log"
 	"math/rand"
-	"os"
-	"runtime"
 	"sync"
 	"time"
 )
-import "labrpc"
 
 // import "bytes"
 // import "labgob"
@@ -60,18 +58,20 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	term        int
-	isLeader    bool
-	voteFor     map[int]int
-	currentTerm int
-	logTerm     []int
-	leader      chan int
-	candidate   chan int
-	follower    chan int
-	timeout     *time.Timer
-	elapse      time.Duration
-	timing      chan int
-	state       int // 0 表示 follower， 1 表示 candidate, 2表示leader
+	voteFor      map[int]int
+	currentTerm  int //所能看到的最新的term
+	logTerm      []int
+	lastLogTerm  int //最后一个log的term
+	lastLogIndex int
+	leader       chan int
+	candidate    chan int
+	follower     chan int
+	timeout      *time.Timer
+	elapse       time.Duration
+	timing       chan int
+	state        int // 0 表示 follower， 1 表示 candidate, 2表示leader
+	unnatural    int // 0 表示正常死亡， 1表示非正常死亡，主要是为了区分当时钟进行判读的时候，如果是由C或
+	// L转换而来，则继续follower,如果是单纯的follower计数完毕， 则转换为 candidate.
 
 }
 
@@ -82,6 +82,12 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	term = rf.currentTerm
+	if rf.state == 2 {
+		isleader = true
+	} else {
+		isleader = false
+	}
 	return term, isleader
 }
 
@@ -150,18 +156,25 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	log.Printf(" before %v 's request,%v 's logterm is %v", args.CandidateId, rf.me, rf.voteFor)
+	log.Printf(" %v's requesetvote args is %v, and the reciever %v currentTerm is %v", args.CandidateId, *args, rf.me, rf.currentTerm)
 	reply.Term = rf.currentTerm
-	if rf.currentTerm < args.Term {
-		rf.currentTerm = args.Term
-	}
 	reply.VoteGranted = false
-	if len(rf.logTerm)-1 < args.LastLogIndex || (len(rf.logTerm)-1 == args.LastLogIndex && rf.logTerm[args.LastLogIndex] <= args.LastLogTerm) {
-		if val, ok := rf.voteFor[rf.currentTerm]; ok && val == args.CandidateId {
+	if rf.lastLogTerm < args.LastLogTerm || (rf.lastLogTerm == args.LastLogTerm && rf.lastLogIndex <= args.LastLogIndex) {
+		if val, ok := rf.voteFor[args.Term]; (ok && (val == args.CandidateId)) || !ok {
 			reply.VoteGranted = true
-			rf.voteFor[rf.currentTerm] = args.CandidateId
+			rf.voteFor[args.Term] = args.CandidateId
 		}
 	}
-
+	if rf.currentTerm < args.Term {
+		rf.currentTerm = args.Term
+		rf.unnatural = 1
+		rf.state = 0
+		rf.timeout.Reset(0)
+	}
+	log.Printf(" after %v 's request,%v 's logterm is %v", args.CandidateId, rf.me, rf.voteFor)
+	rf.mu.Unlock()
 }
 
 //
@@ -194,7 +207,68 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	//filename := strconv.Itoa(args.CandidateId) + ".log"
+	//file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	//if err != nil {
+	//	log.Fatal(err)
+	//}
+	//log.SetOutput(file)
+	//log.Printf("%v go into sendRequestVote to %v", args.CandidateId, rf.me)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+type AppendEntriesArgs struct {
+	// Your data here (2A, 2B).
+	Term         int
+	LeaderId     int
+	LastLogIndex int
+	LastLogTerm  int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []interface{}
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	log.Printf(" %v's heartbeat args is %v, and the reciever %v currentTerm is %v", args.LeaderId, *args, rf.me, rf.currentTerm)
+	log.Printf(" before %v 's heartbeat,%v 's logterm is %v", args.LeaderId, rf.me, rf.voteFor)
+	reply.Term = rf.currentTerm
+	reply.Success = true
+	if args.Entries == nil {
+		if rf.currentTerm <= args.Term {
+			log.Printf(" %v's heartbeat to reciever %v currentTerm is success", args.LeaderId, rf.me)
+			rf.currentTerm = args.Term
+			rf.state = 0
+			rf.unnatural = 1
+			log.Printf(" %v timer was reset in recive heartbeat \n", rf.me)
+			rf.timeout.Reset(0)
+
+		} else {
+			log.Printf(" %v's heartbeat to reciever %v currentTerm is failure", args.LeaderId, rf.me)
+			reply.Success = false
+		}
+	}
+	log.Printf(" after %v 's heartbeat,%v 's logterm is %v", args.LeaderId, rf.me, rf.voteFor)
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	//filename := strconv.Itoa(args.CandidateId) + ".log"
+	//file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	//if err != nil {
+	//	log.Fatal(err)
+	//}
+	//log.SetOutput(file)
+	//log.Printf("%v go into sendRequestVote to %v", args.CandidateId, rf.me)
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -252,175 +326,176 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 
+	appendInterval := time.Duration(50 * time.Millisecond)
+
 	rf.follower = make(chan int, 0)
 	rf.candidate = make(chan int, 0)
 	rf.leader = make(chan int, 0)
-	rf.term = 0
-
-	file, err := os.OpenFile("info.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer file.Close()
-	log.SetOutput(file)
-	log.Print("Logging to a file in Go!")
-
+	rf.timing = make(chan int, 0)
+	rf.voteFor = make(map[int]int)
+	rf.currentTerm = 0
+	rf.lastLogIndex = 0
+	rf.lastLogTerm = 0
 	rf.state = 0
-	rf.isLeader = false
-	//f := func() {
-	//	select{
-	//	case <- rf.follower:{
-	//		//rf.mu.Lock()
-	//		//defer rf.mu.Unlock()
-	//		rf.timeout.Reset(rf.elapse)
-	//		rf.candidate <- 1
-	//	}
-	//	case <- rf.candidate:{
-	//		//rf.mu.Lock()
-	//		//defer rf.mu.Unlock()
-	//		rf.elapse = time.Duration(rand.Intn(200)+300) * time.Millisecond
-	//		rf.timeout.Reset(rf.elapse)
-	//		rf.candidate <- 1
-	//	}
-	//	case <- rf.leader:{
-	//		//rf.mu.Lock()
-	//		//defer rf.mu.Unlock()
-	//		rf.timeout.Reset(rf.elapse)
-	//		rf.leader <- 1
-	//	}
-	//	}
-	//	rf.timing <- 1
-	//}
+	rf.unnatural = 0
 
 	fn := func() {
 		rf.timing <- 1
+		log.Printf(" timer is trigger, %v 's state : %v, its unnatural : %v\n", rf.me, rf.state, rf.unnatural)
 		switch rf.state {
 		case 0:
 			{
-				rf.timeout.Reset(rf.elapse)
-				rf.candidate <- 1
+				rf.mu.Lock()
+				if rf.unnatural == 0 {
+					log.Printf(" %v state change from follower to candidate\n", rf.me)
+					rf.state = 1
+					rf.timeout.Reset(rf.elapse)
+					log.Printf(" %v timer was reset in case0--if and the elapse is %v", rf.me, rf.elapse)
+					rf.mu.Unlock()
+					rf.candidate <- 1
+				} else {
+					log.Printf(" %v state keeps as follower\n", rf.me)
+					rf.unnatural = 0
+					rf.timeout.Reset(rf.elapse)
+					log.Printf(" %v timer was reset in case0--else and the elapse is %v", rf.me, rf.elapse)
+					rf.mu.Unlock()
+					rf.follower <- 1
+				}
 			}
 		case 1:
 			{
+				log.Printf(" %v state change from candidate to candidate\n", rf.me)
+				rf.mu.Lock()
 				rf.elapse = time.Duration(rand.Intn(200)+300) * time.Millisecond
 				rf.timeout.Reset(rf.elapse)
+				log.Printf(" %v timer was reset in case1 and the elapse is %v\n", rf.me, rf.elapse)
+				rf.mu.Unlock()
 				rf.candidate <- 1
 			}
 		case 2:
 			{
-				rf.timeout.Reset(rf.elapse)
+				log.Printf(" %v state keeps as leader\n", rf.me)
+				rf.mu.Lock()
+				rf.timeout.Reset(appendInterval)
+				rf.mu.Unlock()
 				rf.leader <- 1
 			}
 		}
 	}
 
-	rf.elapse = time.Duration(rand.Intn(200)+300) * time.Millisecond
-	rf.timeout = time.AfterFunc(rf.elapse, fn)
-
 	go func() {
-		log.Print("waiting for the follower state")
-		<-rf.follower
-		rf.mu.Lock()
-		_, file, line, ok := runtime.Caller(0)
-		if ok {
-			log.Printf("lock in file: %s    line=%d\n", file, line)
+		for {
+			<-rf.follower
+			log.Printf(" %v into follower stage and current term is %v", rf.me, rf.currentTerm)
+			<-rf.timing
+			log.Printf(" %v out of follower stage\n", rf.me)
+
 		}
-		rf.state = 0
-		rf.mu.Unlock()
-		_, file, line, ok = runtime.Caller(0)
-		if ok {
-			log.Printf("unlock in file: %s    line=%d\n", file, line)
-		}
-		<-rf.timing
 	}()
 
 	go func() {
-		<-rf.candidate
-		rf.mu.Lock()
-		_, file, line, ok := runtime.Caller(0)
-		if ok {
-			log.Printf("lock in file: %s    line=%d\n", file, line)
-		}
-		rf.state = 1
-		rf.isLeader = false
-		rf.mu.Unlock()
-		_, file, line, ok = runtime.Caller(0)
-		if ok {
-			log.Printf("unlock in file: %s    line=%d\n", file, line)
-		}
-		args := &RequestVoteArgs{rf.currentTerm, me, len(rf.logTerm), rf.logTerm[len(rf.logTerm)-1]}
-		reply := &RequestVoteReply{}
-		sum := make([]int, len(peers))
-		for i := 0; i < len(peers); i++ {
-			i := i
-			if i != me {
-				go func() {
-					rf.mu.Lock()
-					_, file, line, ok := runtime.Caller(0)
-					if ok {
-						log.Printf("lock in file: %s    line=%d\n", file, line)
-					}
-					if sum[i] != 1 {
+		for {
+			<-rf.candidate
+			rf.mu.Lock()
+			rf.currentTerm += 1
+			rf.voteFor[rf.currentTerm] = rf.me
+			args := &RequestVoteArgs{rf.currentTerm, me, rf.lastLogIndex, rf.lastLogTerm}
+			reply := &RequestVoteReply{}
+			log.Printf(" %v into candidate stage and current term is %v", rf.me, rf.currentTerm)
+			rf.mu.Unlock()
+			var voteToGet int
+			if len(peers)%2 == 1 {
+				voteToGet = (len(peers) + 1) / 2
+			} else {
+				voteToGet = len(peers)/2 + 1
+			}
+			if voteToGet == 1 {
+				log.Printf(" %v in candidate is continue", rf.me)
+				continue
+			}
+			sum := make([]int, len(peers))
+			sum[rf.me] = 1
+			for i := 0; i < len(peers); i++ {
+				log.Printf(" %v start send request to %v", rf.me, i)
+				if i != rf.me {
+					i := i
+					go func() {
+						fterm := rf.currentTerm
 						if rf.sendRequestVote(i, args, reply) {
-							sum[i] = 1
-						} else {
-							if reply.Term > rf.currentTerm {
-								rf.follower <- 1
-								rf.timeout.Reset(0)
+							if reply.VoteGranted {
+								sum[i] = 1
+							} else {
+								if reply.Term > fterm && fterm == rf.currentTerm {
+									rf.mu.Lock()
+									rf.state = 0
+									rf.unnatural = 1
+									rf.timeout.Reset(0)
+									rf.mu.Unlock()
+								}
 							}
 						}
-					}
+					}()
+				}
+			}
+			go func() {
+				fterm := rf.currentTerm
+				time.Sleep(rf.elapse - 10*time.Millisecond) // 这个10ms是考虑从计时器开始计时到启动这个goroutine所用的开销
+				num := 0
+				for _, value := range sum {
+					num += value
+				}
+				if num >= voteToGet && fterm == rf.currentTerm && rf.state == 1 {
+					log.Printf(" %v become leader", rf.me)
+					rf.mu.Lock()
+					rf.state = 2
+					rf.timeout.Reset(0)
 					rf.mu.Unlock()
-					_, file, line, ok = runtime.Caller(0)
-					if ok {
-						log.Printf("unlock in file: %s    line=%d\n", file, line)
-					}
-				}()
-			}
+				}
+			}()
+			<-rf.timing
+			log.Printf(" %v out of candidate stage\n", rf.me)
 		}
-		go func() {
-			rf.mu.Lock()
-			_, file, line, ok := runtime.Caller(0)
-			if ok {
-				log.Printf("lock in file: %s    line=%d\n", file, line)
-			}
-			num := 0
-			for i := range sum {
-				num += i
-			}
-			if num > len(peers)/2 {
-				rf.timeout.Reset(0)
-				rf.leader <- 1
-			}
-			rf.mu.Unlock()
-			_, file, line, ok = runtime.Caller(0)
-			if ok {
-				log.Printf("unlock in file: %s    line=%d\n", file, line)
-			}
-		}()
-		<-rf.timing
 	}()
 
 	go func() {
-		<-rf.leader
-		rf.mu.Lock()
-		_, file, line, ok := runtime.Caller(0)
-		if ok {
-			log.Printf("lock in file: %s    line=%d\n", file, line)
+		for {
+			<-rf.leader
+			log.Printf(" %v into leader and current term is %v", rf.me, rf.currentTerm)
+			rf.mu.Lock()
+			args := &AppendEntriesArgs{rf.currentTerm, me, 0, 0, 0, 0, nil, 0}
+			reply := &AppendEntriesReply{}
+			fterm := rf.currentTerm
+			rf.mu.Unlock()
+			for i := 0; i < len(peers); i++ {
+				i := i
+				if i != rf.me {
+					go func() {
+						if rf.sendAppendEntries(i, args, reply) {
+							log.Printf(" %v send heartbeat to %v and the reply is %v", rf.me, i, reply)
+							if !reply.Success {
+								if reply.Term > fterm && fterm == rf.currentTerm && rf.state == 2 {
+									rf.mu.Lock()
+									rf.state = 0
+									rf.unnatural = 1
+									rf.timeout.Reset(0)
+									log.Printf(" %v from leader to follower\n", rf.me)
+									rf.mu.Unlock()
+								}
+							}
+						}
+					}()
+				}
+			}
+			<-rf.timing
+			log.Printf(" %v out of leader stage\n", rf.me)
 		}
-		rf.isLeader = true
-		rf.state = 2
-		rf.mu.Unlock()
-		_, file, line, ok = runtime.Caller(0)
-		if ok {
-			log.Printf("unlock in file: %s    line=%d\n", file, line)
-		}
-		<-rf.timing
 	}()
 
-	log.Print("rf.follower is waiting")
 	rf.follower <- 1
-	time.Sleep(5 * time.Second)
+	log.Printf(" %v is initial\n", rf.me)
+	rf.elapse = time.Duration(rand.Intn(200)+300) * time.Millisecond
+	log.Printf(" %v 's elapse is :\t%v\n", rf.me, rf.elapse)
+	rf.timeout = time.AfterFunc(rf.elapse, fn)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
