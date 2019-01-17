@@ -276,7 +276,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
-// agreement and return immediately. there is no guarantee that this
+//// agreement and return immediately. there is no guarantee that this
 // command will ever be committed to the Raft log, since the leader
 // may fail or lose an election. even if the Raft instance has been killed,
 // this function should return gracefully.
@@ -409,10 +409,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			} else {
 				voteToGet = len(peers)/2 + 1
 			}
-			if voteToGet == 1 {
-				log.Printf(" %v in candidate is continue", rf.me)
-				continue
-			}
+			log.Printf(" the vote to get is %v", voteToGet)
+			//if voteToGet == 1 {
+			//	log.Printf(" %v in candidate is continue", rf.me)
+			//	continue
+			//}
 			sum := make([]int, len(peers))
 			sum[rf.me] = 1
 			for i := 0; i < len(peers); i++ {
