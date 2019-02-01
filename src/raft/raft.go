@@ -174,6 +174,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	log.Printf(" before %v 's request,%v 's votefor is %v", args.CandidateId, rf.me, rf.voteFor)
 	log.Printf(" %v's requesetvote args is %v, and the reciever %v currentTerm is %v", args.CandidateId, *args, rf.me, rf.currentTerm)
 	reply.Term = rf.currentTerm
@@ -182,19 +183,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		if rf.logOfRaft[len(rf.logOfRaft)-1].Term < args.LastLogTerm || (rf.logOfRaft[len(rf.logOfRaft)-1].Term == args.LastLogTerm && len(rf.logOfRaft)-1 <= args.LastLogIndex) {
 			if val, ok := rf.voteFor[args.Term]; (ok && (val == args.CandidateId)) || !ok {
+				rf.unnatural <- 1
+				log.Printf(" %v 's rf.unnatural <- 1 in receive RequestVote", rf.me)
+				rf.state = 0
+				rf.timeout.Reset(0)
 				reply.VoteGranted = true
 				rf.voteFor[args.Term] = args.CandidateId
 			}
 		}
-	}
-	if reply.VoteGranted == true {
-		log.Printf(" %v 's rf.unnatural <- 1 in receive RequestVote", rf.me)
-		rf.unnatural <- 1
-		rf.state = 0
-		rf.timeout.Reset(0)
-		rf.mu.Unlock()
-	} else {
-		rf.mu.Unlock()
 	}
 
 	log.Printf(" after %v 's request,%v 's votefor is %v", args.CandidateId, rf.me, rf.voteFor)
@@ -240,7 +236,8 @@ type AppendEntriesArgs struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      *LogOfRaft //此处假设一次仅发送一个log
+	//Entries      *LogOfRaft //此处假设一次仅发送一个log
+	Entries      map[int]LogOfRaft
 	LeaderCommit int
 }
 
@@ -252,70 +249,67 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	//即使只是传一个普通的心跳，也要做连续性检查，如果回复正确，等于告诉leader我们的log 包含prevLogIndex并且和leader相匹配
 	//这会导致leader认为entry已经被提交到大部分的机器上，从而去commit.
 	if args.Entries == nil {
-		log.Printf(" %v receive a heartbeat and the params is %v, before receive, it's term is %v, log is %v, log length is %v, commitIndex is %v", rf.me, args, rf.currentTerm, rf.logOfRaft, len(rf.logOfRaft)-1, rf.commitIndex)
+		//log.Printf(" %v receive a heartbeat and the params is %v, before receive, it's term is %v, log is %v, log length is %v, commitIndex is %v", rf.me, args, rf.currentTerm, rf.logOfRaft, len(rf.logOfRaft)-1, rf.commitIndex)
 	} else {
 		log.Printf(" %v receive a log and the params is %v, before receive, it's term is %v, log is %v, log length is %v, commitIndex is %v", rf.me, args, rf.currentTerm, rf.logOfRaft, len(rf.logOfRaft)-1, rf.commitIndex)
 
 	}
 
 	if rf.currentTerm <= args.Term {
-		if rf.state != 2 {
-			val, ok := rf.logOfRaft[args.PrevLogIndex]
-			if !ok {
-				reply.Success = false
-			} else if ok && val.Term != args.PrevLogTerm {
-				reply.Success = false
-				for k := range rf.logOfRaft {
-					if k >= args.PrevLogIndex {
-						delete(rf.logOfRaft, k)
-					}
-				}
-			} else {
-				reply.Success = true
-				if args.Entries != nil {
-					rf.logOfRaft[args.PrevLogIndex+1] = *args.Entries
-				}
-				if args.LeaderCommit > rf.commitIndex { //关于commit应该只有在成功时才	可以commitIndex
-					_oldCommitIndex := rf.commitIndex
-					if len(rf.logOfRaft)-1 <= args.LeaderCommit {
-						rf.commitIndex = len(rf.logOfRaft) - 1
-					} else {
-						rf.commitIndex = args.LeaderCommit
-					}
-					for i := _oldCommitIndex + 1; i <= rf.commitIndex; i++ {
-						rf.commitChannel <- i
-					}
+		rf.unnatural <- 1
+		rf.currentTerm = args.Term
+		rf.state = 0
+		rf.timeout.Reset(0)
+		//if args.Entries == nil {
+		//	log.Printf(" %v's timer is reset when receive heartbeat", rf.me)
+		//} else {
+		//	log.Printf(" %v's timer is reset when receive log", rf.me)
+		//}
+
+		val, ok := rf.logOfRaft[args.PrevLogIndex]
+		if !ok {
+			reply.Success = false
+		} else if ok && val.Term != args.PrevLogTerm {
+			reply.Success = false
+			for k := range rf.logOfRaft {
+				if k >= args.PrevLogIndex {
+					delete(rf.logOfRaft, k)
 				}
 			}
 		} else {
-			log.Printf(" leader %v into follower", rf.me)
+			reply.Success = true
+			if args.Entries != nil {
+				log.Printf(" %v get command %v from %v", rf.me, args.Entries, args.LeaderId)
+				for k := range args.Entries {
+					if k >= args.PrevLogIndex {
+						rf.logOfRaft[k] = args.Entries[k]
+					}
+				}
+			}
+			if args.LeaderCommit > rf.commitIndex { //关于commit应该只有在成功时才	可以commitIndex
+				_oldCommitIndex := rf.commitIndex
+				if len(rf.logOfRaft)-1 <= args.LeaderCommit {
+					rf.commitIndex = len(rf.logOfRaft) - 1
+				} else {
+					rf.commitIndex = args.LeaderCommit
+				}
+				for i := _oldCommitIndex + 1; i <= rf.commitIndex; i++ {
+					rf.commitChannel <- i
+				}
+			}
 		}
-
-		rf.unnatural <- 1
-
-		rf.currentTerm = args.Term
-		rf.state = 0
 		if args.Entries == nil {
-			log.Printf(" %v's timer is reset when receive heartbeat", rf.me)
-		} else {
-			log.Printf(" %v's timer is reset when receive log", rf.me)
-		}
-		rf.timeout.Reset(0)
-		if args.Entries == nil {
-			log.Printf(" after receive the %v's heartbeat, %v's term is %v, log is %v, log length is %v, commitIndex is %v", args.LeaderId, rf.me, rf.currentTerm, rf.logOfRaft, len(rf.logOfRaft)-1, rf.commitIndex)
+			//log.Printf(" after receive the %v's heartbeat, %v's term is %v, log is %v, log length is %v, commitIndex is %v", args.LeaderId, rf.me, rf.currentTerm, rf.logOfRaft, len(rf.logOfRaft)-1, rf.commitIndex)
 		} else {
 			log.Printf(" after receive the %v's log %v, %v's term is %v, log is %v, log length is %v, commitIndex is %v", args.LeaderId, args.Entries, rf.me, rf.currentTerm, rf.logOfRaft, len(rf.logOfRaft)-1, rf.commitIndex)
 		}
-		rf.mu.Unlock()
-		//rf.unnatural <- 1
-
 	} else {
-		rf.mu.Unlock()
 		reply.Success = false
 	}
 
@@ -384,13 +378,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		_term := rf.currentTerm        //保存下当前所需要的
 		_commitIndex := rf.commitIndex //当前所提交的index
 
-		_nextIndex := rf.nextIndex
-		_matchIndex := rf.matchIndex
-
-		for k := range _nextIndex {
-			_nextIndex[k] = _commandIndex
-		}
-
 		index = _commandIndex
 		term = _term
 
@@ -403,13 +390,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 				if _term == rf.currentTerm && rf.state == 2 && rf.commitIndex < _commandIndex {
 					sum := 1
 					for i := 0; i < len(rf.peers); i++ {
-						if i != rf.me && _matchIndex[i] == _commandIndex {
+						if i != rf.me && rf.matchIndex[i] >= _commandIndex {
 							sum += 1
 						}
 					}
 					log.Printf(" %v get %v agree on log %v", rf.me, sum, rf.logOfRaft[_commandIndex].Command)
-					//rf.mu.Lock()
-					//if sum >= _majority && rf.commitIndex < _commandIndex{
 					if sum >= _majority {
 						log.Printf(" %v commit log %v and old commitindex is %v, the new commit index is %v", rf.me, rf.logOfRaft[_commandIndex].Command, rf.commitIndex, _commandIndex)
 						_oldCommitIndex := rf.commitIndex
@@ -443,20 +428,18 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			i := i
 			if i != rf.me {
 				go func() {
+					_entryToSend := make(map[int]LogOfRaft)
+					_currentSentLastIndex := _commandIndex - 1
 					for {
-						_currentSentLastIndex := _nextIndex[i] - 1
-						if rf.currentTerm != _term {
-							quit <- 1
-							return
-						}
 						rf.mu.Lock()
-						entryToSend := rf.logOfRaft[_currentSentLastIndex+1]
-						log.Printf(" before %v send log entry %v to %v, its log is %v, its nextindex is %v", rf.me, entryToSend, i, rf.logOfRaft, _nextIndex)
-						args := &AppendEntriesArgs{_term, rf.me, _currentSentLastIndex, rf.logOfRaft[_currentSentLastIndex].Term, &entryToSend, _commitIndex}
+						_entryToSend[_currentSentLastIndex+1] = rf.logOfRaft[_currentSentLastIndex+1]
+						//entryToSend := rf.logOfRaft[_currentSentLastIndex+1]
+						//log.Printf(" before %v send log entry %v to %v, its log is %v, its nextindex is %v", rf.me, _entryToSend, i, rf.logOfRaft, rf.nextIndex)
+						args := &AppendEntriesArgs{_term, rf.me, _currentSentLastIndex, rf.logOfRaft[_currentSentLastIndex].Term, _entryToSend, _commitIndex}
 						reply := &AppendEntriesReply{}
 						rf.mu.Unlock()
 						if rf.sendAppendEntries(i, args, reply) {
-							log.Printf(" %v send log entry to %v and the reply is %v", rf.me, i, reply)
+							log.Printf(" %v send log entry %v to %v and the reply is %v", rf.me, _entryToSend, i, reply)
 							if _term == rf.currentTerm && rf.state == 2 {
 								if !reply.Success {
 									if reply.Term > _term {
@@ -470,35 +453,34 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 										quit <- 1
 										return
 									} else {
-										if _currentSentLastIndex > 0 {
-											_nextIndex[i] = _currentSentLastIndex
+										log.Printf(" %v send command %v need to -1", rf.me, _entryToSend)
+										if _currentSentLastIndex > rf.matchIndex[i] {
+											_currentSentLastIndex -= 1
 										}
 									}
 								} else {
-									log.Printf(" %v has send log entry %v to %v", rf.me, entryToSend, i)
-									_matchIndex[i] = _currentSentLastIndex + 1
-									_nextIndex[i] = _currentSentLastIndex + 1 + 1
-									if _nextIndex[i] == _commandIndex+1 {
-										log.Printf(" %v send log entry to %v success", rf.me, i)
-										rf.mu.Lock()
-										for k := range _nextIndex {
-											rf.nextIndex[k] = _nextIndex[k]
-											rf.matchIndex[k] = _matchIndex[k]
-										}
-										rf.mu.Unlock()
-										return
-									}
+									log.Printf(" %v has send log entry %v to %v success", rf.me, _entryToSend, i)
+									rf.mu.Lock()
+									rf.matchIndex[i] = _commandIndex
+									rf.nextIndex[i] = _commandIndex + 1
+									rf.mu.Unlock()
+									return
 								}
 							} else {
 								quit <- 1
+								log.Printf(" %v state changed and send off", rf.me)
 								return
 							}
+						} else {
+							log.Printf(" %v send log entry to %v fail because of the network", rf.me, i)
 						}
 						time.Sleep(10 * time.Millisecond)
 					}
 				}()
 			}
 		}
+
+		time.Sleep(time.Second)
 	}
 
 	return index, term, isLeader
@@ -554,7 +536,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(peers))
 
 	fn := func() {
-		log.Printf(" timer is trigger, %v 's state : %v, its unnatural : %v\n", rf.me, rf.state, rf.unnatural)
 		rf.timing <- 1
 		switch rf.state {
 		case 0:
@@ -594,18 +575,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			}
 		case 2:
 			{
-				//select {
-				//case <- rf.unnatural:{   //第一次成为某个term的leader
-				//	for pos:= 0; pos < len(rf.peers); pos++{
-				//		rf.nextIndex[pos] = rf.lastLogIndex+1
-				//		rf.matchIndex[pos] = 0
-				//	}
-				//	log.Printf(" %v's initial nextIndex is %v", rf.me, rf.nextIndex)
-				//}
-				//default:{ //正常死亡
-				//	log.Printf(" %v state keeps as leader\n", rf.me)
-				//}
-				//}
 				rf.mu.Lock()
 				rf.timeout.Reset(appendInterval)
 				rf.mu.Unlock()
@@ -617,9 +586,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go func() {
 		for {
 			<-rf.follower
-			log.Printf(" %v into follower stage and current term is %v", rf.me, rf.currentTerm)
+			//log.Printf(" %v into follower stage and current term is %v", rf.me, rf.currentTerm)
 			<-rf.timing
-			log.Printf(" %v out of follower stage\n", rf.me)
+			//log.Printf(" %v out of follower stage\n", rf.me)
 
 		}
 	}()
@@ -639,11 +608,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			} else {
 				voteToGet = len(peers)/2 + 1
 			}
-			log.Printf(" the vote to get is %v", voteToGet)
-			//if voteToGet == 1 {
-			//	log.Printf(" %v in candidate is continue", rf.me)
-			//	continue
-			//}
+			//log.Printf(" the vote to get is %v", voteToGet)
 			for key := range sum {
 				sum[key] = 0
 			}
@@ -685,7 +650,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					for _, value := range sum {
 						num += value
 					}
-					log.Printf(" %v get %v vote", rf.me, sum)
+					//log.Printf(" %v get %v vote", rf.me, sum)
 					if fterm == rf.currentTerm && rf.state == 1 {
 						if num >= voteToGet {
 							log.Printf(" %v was elected as leader", rf.me)
@@ -705,14 +670,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				}
 			}()
 			<-rf.timing
-			log.Printf(" %v out of candidate stage\n", rf.me)
+			//log.Printf(" %v out of candidate stage\n", rf.me)
 		}
 	}()
 
 	go func() {
 		for {
 			<-rf.leader
-			log.Printf(" %v into leader and current term is %v", rf.me, rf.currentTerm)
+			//log.Printf(" %v into leader and current term is %v", rf.me, rf.currentTerm)
 			for i := 0; i < len(peers); i++ {
 				i := i
 				if i != rf.me {
@@ -723,7 +688,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 						reply := &AppendEntriesReply{}
 						rf.mu.Unlock()
 						if rf.sendAppendEntries(i, args, reply) {
-							log.Printf(" %v send heartbeat to %v success and the reply is %v", rf.me, i, reply)
+							//log.Printf(" %v send heartbeat to %v success and the reply is %v", rf.me, i, reply)
 							if !reply.Success {
 								if reply.Term > fterm && fterm == rf.currentTerm && rf.state == 2 {
 									rf.mu.Lock()
@@ -733,7 +698,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 									rf.timeout.Reset(0)
 									log.Printf(" %v from leader to follower\n", rf.me)
 									rf.mu.Unlock()
-									//rf.unnatural <- 1
 								}
 							}
 						}
@@ -741,7 +705,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				}
 			}
 			<-rf.timing
-			log.Printf(" %v out of leader stage\n", rf.me)
+			//log.Printf(" %v out of leader stage\n", rf.me)
 		}
 	}()
 
