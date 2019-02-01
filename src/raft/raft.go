@@ -236,8 +236,8 @@ type AppendEntriesArgs struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	//Entries      *LogOfRaft //此处假设一次仅发送一个log
-	Entries      map[int]LogOfRaft
+	Entries      *LogOfRaft //此处假设一次仅发送一个log
+	//Entries      map[int]LogOfRaft
 	LeaderCommit int
 }
 
@@ -286,11 +286,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Success = true
 			if args.Entries != nil {
 				log.Printf(" %v get command %v from %v", rf.me, args.Entries, args.LeaderId)
-				for k := range args.Entries {
-					if k >= args.PrevLogIndex {
-						rf.logOfRaft[k] = args.Entries[k]
-					}
-				}
+				rf.logOfRaft[args.PrevLogIndex+1] = *args.Entries
 			}
 			if args.LeaderCommit > rf.commitIndex { //关于commit应该只有在成功时才	可以commitIndex
 				_oldCommitIndex := rf.commitIndex
@@ -378,15 +374,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		_term := rf.currentTerm        //保存下当前所需要的
 		_commitIndex := rf.commitIndex //当前所提交的index
 
-		index = _commandIndex
-		term = _term
+		index = _commandIndex //函数返回值
+		term = _term          //函数返回值
 
 		log.Printf(" %v need to send log to others and current log entry is %v, its index is %v", rf.me, rf.logOfRaft[_commandIndex], _commandIndex)
 		rf.mu.Unlock()
 
 		go func() {
 			for {
-				rf.mu.Lock()
 				if _term == rf.currentTerm && rf.state == 2 && rf.commitIndex < _commandIndex {
 					sum := 1
 					for i := 0; i < len(rf.peers); i++ {
@@ -396,19 +391,18 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 					}
 					log.Printf(" %v get %v agree on log %v", rf.me, sum, rf.logOfRaft[_commandIndex].Command)
 					if sum >= _majority {
+						rf.mu.Lock()
 						log.Printf(" %v commit log %v and old commitindex is %v, the new commit index is %v", rf.me, rf.logOfRaft[_commandIndex].Command, rf.commitIndex, _commandIndex)
 						_oldCommitIndex := rf.commitIndex
 						rf.commitIndex = _commandIndex
+						rf.mu.Unlock()
 						for i := _oldCommitIndex + 1; i <= rf.commitIndex; i++ {
 							rf.commitChannel <- i
 						}
-						rf.mu.Unlock()
 						return
 					} else {
-						rf.mu.Unlock()
 					}
 				} else {
-					rf.mu.Unlock()
 					return
 				}
 				select {
@@ -428,14 +422,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			i := i
 			if i != rf.me {
 				go func() {
-					_entryToSend := make(map[int]LogOfRaft)
-					_currentSentLastIndex := _commandIndex - 1
 					for {
 						rf.mu.Lock()
-						_entryToSend[_currentSentLastIndex+1] = rf.logOfRaft[_currentSentLastIndex+1]
-						//entryToSend := rf.logOfRaft[_currentSentLastIndex+1]
+						_currentSentLastIndex := _commandIndex - 1
+						_entryToSend := rf.logOfRaft[_currentSentLastIndex+1]
 						//log.Printf(" before %v send log entry %v to %v, its log is %v, its nextindex is %v", rf.me, _entryToSend, i, rf.logOfRaft, rf.nextIndex)
-						args := &AppendEntriesArgs{_term, rf.me, _currentSentLastIndex, rf.logOfRaft[_currentSentLastIndex].Term, _entryToSend, _commitIndex}
+						args := &AppendEntriesArgs{_term, rf.me, _currentSentLastIndex, rf.logOfRaft[_currentSentLastIndex].Term, &_entryToSend, _commitIndex}
 						reply := &AppendEntriesReply{}
 						rf.mu.Unlock()
 						if rf.sendAppendEntries(i, args, reply) {
@@ -454,17 +446,21 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 										return
 									} else {
 										log.Printf(" %v send command %v need to -1", rf.me, _entryToSend)
-										if _currentSentLastIndex > rf.matchIndex[i] {
-											_currentSentLastIndex -= 1
+										_currentSentLastIndex -= 1
+										if _currentSentLastIndex < rf.matchIndex[i] {
+											_currentSentLastIndex = rf.matchIndex[i]
 										}
 									}
 								} else {
 									log.Printf(" %v has send log entry %v to %v success", rf.me, _entryToSend, i)
+									_currentSentLastIndex += 1
 									rf.mu.Lock()
-									rf.matchIndex[i] = _commandIndex
-									rf.nextIndex[i] = _commandIndex + 1
+									rf.matchIndex[i] = _currentSentLastIndex
+									rf.nextIndex[i] = _currentSentLastIndex + 1
 									rf.mu.Unlock()
-									return
+									if _currentSentLastIndex == _commandIndex {
+										return
+									}
 								}
 							} else {
 								quit <- 1
