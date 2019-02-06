@@ -18,7 +18,10 @@ package raft
 //
 
 import (
+	"bytes"
+	"labgob"
 	"labrpc"
+	"log"
 	"math/rand"
 	"sort"
 	"sync"
@@ -150,6 +153,7 @@ func GetRandomElectionTimeout() time.Duration {
 }
 
 func (rf *Raft) convertToFollower(term int) {
+	defer rf.persist()
 	DPrintf(" Convert server(%v) state(%v=>follower) term(%v => %v)", rf.me,
 		rf.state.String(), rf.currentTerm, term)
 
@@ -159,6 +163,7 @@ func (rf *Raft) convertToFollower(term int) {
 }
 
 func (rf *Raft) convertToCandidate() {
+	defer rf.persist()
 	DPrintf(" Convert server(%v) state(%v=>candidate) term(%v => %v)", rf.me,
 		rf.state.String(), rf.currentTerm, rf.currentTerm+1)
 	rf.state = Candidate
@@ -167,6 +172,7 @@ func (rf *Raft) convertToCandidate() {
 }
 
 func (rf *Raft) convertToLeader() {
+	defer rf.persist()
 	if rf.state != Candidate {
 		return
 	}
@@ -207,6 +213,26 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+
+	DPrintf(" server %v persist success and current term is %v", rf.me, rf.currentTerm)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	err := e.Encode(rf.currentTerm)
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = e.Encode(rf.voteFor)
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = e.Encode(rf.logOfRaft)
+	if err != nil {
+		log.Fatal(err)
+	}
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
+
 }
 
 //
@@ -229,6 +255,34 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var voteFor int
+	var logOfRaft []LogOfRaft
+	err := d.Decode(&currentTerm)
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = d.Decode(&voteFor)
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = d.Decode(&logOfRaft)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	rf.currentTerm = currentTerm
+	rf.voteFor = voteFor
+	rf.logOfRaft = logOfRaft
+
+	DPrintf(" server %v readPersist success and current term is %v", rf.me, rf.currentTerm)
+
 }
 
 //
@@ -260,6 +314,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	DPrintf(" before %v 's request,%v 's votefor is %v", args.CandidateId, rf.me, rf.voteFor)
 	DPrintf(" %v's requesetvote args is %v, and the reciever %v currentTerm is %v", args.CandidateId, *args, rf.me, rf.currentTerm)
 
@@ -339,6 +394,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	success := false
 	conflictIndex := 0 //我希望得到的下一个log的index
@@ -445,6 +501,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		}
 		index = len(rf.logOfRaft) - 1 //函数返回值
 		term = rf.currentTerm         //函数返回值
+		rf.persist()
 		DPrintf(" %v need to send command %v, and its index is %v", rf.me, command, index)
 		rf.mu.Unlock()
 
