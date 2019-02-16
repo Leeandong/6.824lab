@@ -112,6 +112,7 @@ type Raft struct {
 	grantVoteCh   chan bool
 	leaderCh      chan bool
 	applyCh       chan ApplyMsg
+	exitCh        chan bool
 }
 
 // return currentTerm and whether this server
@@ -496,9 +497,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.mu.Lock()
 		_commandIndex := len(rf.logOfRaft)
 		rf.logOfRaft = append(rf.logOfRaft, LogOfRaft{_commandIndex, rf.currentTerm, command})
-		for i := 0; i < len(rf.peers); i++ {
-			rf.nextIndex[i] = len(rf.logOfRaft)
-		}
+		//for i := 0; i < len(rf.peers); i++ {
+		//	rf.nextIndex[i] = len(rf.logOfRaft)
+		//}
 		index = len(rf.logOfRaft) - 1 //函数返回值
 		term = rf.currentTerm         //函数返回值
 		rf.persist()
@@ -518,12 +519,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	DPrintf(" Kill Server(%v)", rf.me)
+	dropAndSet(rf.exitCh)
 }
 
 func (rf *Raft) applyLogs() {
 	for rf.commitIndex > rf.lastApplied {
-		DPrintf(" Server(%v) applyLogs, commitIndex:%v, lastApplied:%v, command:%v", rf.me, rf.commitIndex, rf.lastApplied, rf.logOfRaft[rf.lastApplied].Command)
 		rf.lastApplied++
+		DPrintf(" Server(%v) applyLogs, commitIndex:%v, lastApplied:%v, command:%v", rf.me, rf.commitIndex, rf.lastApplied, rf.logOfRaft[rf.lastApplied].Command)
 		entry := rf.logOfRaft[rf.lastApplied]
 		msg := ApplyMsg{
 			true,
@@ -541,7 +544,7 @@ func (rf *Raft) advanceCommitIndex() {
 	sort.Ints(matchIndex)
 
 	newCommitIndex := matchIndex[len(rf.peers)/2]
-	DPrintf(" in advance CommitIndex matchIndexes:%v, newCommitIndex:%v", matchIndex, newCommitIndex)
+	//DPrintf(" in advance CommitIndex matchIndexes:%v, newCommitIndex:%v", matchIndex, newCommitIndex)
 
 	if rf.state == Leader && newCommitIndex > rf.commitIndex && rf.logOfRaft[newCommitIndex].Term == rf.currentTerm {
 		rf.commitIndex = newCommitIndex
@@ -707,6 +710,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.grantVoteCh = make(chan bool, 1)
 	rf.appendEntryCh = make(chan bool, 1)
 	rf.leaderCh = make(chan bool, 1)
+	rf.exitCh = make(chan bool, 1)
 
 	rf.applyCh = applyCh
 
@@ -715,6 +719,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go func() {
 		for {
+			select {
+			case <-rf.exitCh:
+				DPrintf(" Exit Server(%v)", rf.me)
+				break
+			default:
+			}
 			electionTimeout := GetRandomElectionTimeout()
 			rf.mu.Lock()
 			state := rf.state
