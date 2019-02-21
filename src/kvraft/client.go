@@ -2,7 +2,6 @@ package raftkv
 
 import (
 	"labrpc"
-	"log"
 	"time"
 )
 import "crypto/rand"
@@ -55,17 +54,14 @@ func (ck *Clerk) Get(key string) string {
 				continue
 			}
 			DPrintf(" clerk get key(%v) from kvserver %v and the reply is %v, err IS %v", key, ck.currentLeader, reply.Value, reply.Err)
-			if reply.Err != "" {
-				r = ""
-			} else {
-				r = reply.Value
-			}
 			if reply.Err == ErrNoKey {
 				r = ""
-			} else if reply.Err == "" {
+				break
+			} else if reply.Err == OK {
 				r = reply.Value
 				break
 			} else {
+				DPrintf(" Error%v occurs in get ", reply.Err)
 				continue
 			}
 		}
@@ -104,10 +100,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			} else {
 				DPrintf(" clerk get wrong putAppend op")
 			}
-			if reply.Err != "" {
-				log.Fatal(reply.Err)
-			} else {
+
+			if reply.Err == OK {
 				break
+			} else {
+				DPrintf(" Error%v occurs in PutAppend ", reply.Err)
+				continue
 			}
 		}
 	}

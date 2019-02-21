@@ -9,7 +9,7 @@ import (
 	"sync"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -124,7 +124,7 @@ func (kv *KVServer) Kill() {
 
 func (kv *KVServer) ConcreteGet(key string) (Err, string) {
 
-	var _err Err
+	var _err Err = OK
 	var _val string
 
 	kv.mu.Lock()
@@ -142,7 +142,7 @@ func (kv *KVServer) ConcreteGet(key string) (Err, string) {
 
 func (kv *KVServer) ConcretePut(key string, val string) (Err, string) {
 
-	var _err Err
+	var _err Err = OK
 	var _val string
 
 	kv.mu.Lock()
@@ -159,7 +159,7 @@ func (kv *KVServer) ConcretePut(key string, val string) (Err, string) {
 }
 
 func (kv *KVServer) ConcreteAppend(key string, val string) (Err, string) {
-	var _err Err
+	var _err Err = OK
 	var _val string
 
 	kv.mu.Lock()
