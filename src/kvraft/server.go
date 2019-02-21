@@ -5,10 +5,11 @@ import (
 	"labrpc"
 	"log"
 	"raft"
+	"reflect"
 	"sync"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -17,11 +18,26 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+const (
+	GET    = "Get"
+	APPEND = "Append"
+	PUT    = "Put"
+)
+
+type Notice struct {
+	index int
+	err   Err
+	val   string
+}
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+
+	Operation string
+	Key       string
+	Value     string
 }
 
 type KVServer struct {
@@ -33,15 +49,66 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+
+	dataSet      map[string]string
+	applyIndex   int
+	notification chan Notice
 }
 
+func Drop(noticeChan chan Notice) {
+	select {
+	case <-noticeChan:
+	default:
+	}
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+
+	command := Op{GET, args.Key, ""}
+
+	index, _, ok := kv.rf.Start(command)
+	DPrintf(" the rfserver(%v) start command success? %v", kv.me, ok)
+	if ok == false {
+		reply.WrongLeader = true
+		return
+	}
+
+	tmpNotice := <-kv.notification
+
+	if tmpNotice.index == index {
+		reply.Err = tmpNotice.err
+		reply.Value = tmpNotice.val
+		reply.WrongLeader = false
+	}
+
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+
+	_op := args.Op
+	_key := args.Key
+	_value := args.Value
+
+	command := Op{_op, _key, _value}
+
+	index, _, ok := kv.rf.Start(command)
+	DPrintf(" the rfserver(%v) start command success? %v", kv.me, ok)
+	if ok == false {
+		reply.WrongLeader = true
+		return
+	}
+
+	tmpNotice := <-kv.notification
+
+	//DPrintf( " %v get the notification and command index is %v, apply index is %v", kv.me, index, tmpNotice.index)
+
+	if tmpNotice.index == index {
+		//DPrintf( " %v reply %v is success ", kv.me, *reply)
+		reply.Err = tmpNotice.err
+		reply.WrongLeader = false
+	}
 }
 
 //
@@ -53,6 +120,92 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+}
+
+func (kv *KVServer) ConcreteGet(key string) (Err, string) {
+
+	var _err Err
+	var _val string
+
+	kv.mu.Lock()
+	val, ok := kv.dataSet[key]
+	kv.mu.Unlock()
+	if ok {
+		_val = val
+	} else {
+		_err = ErrNoKey
+	}
+
+	return _err, _val
+
+}
+
+func (kv *KVServer) ConcretePut(key string, val string) (Err, string) {
+
+	var _err Err
+	var _val string
+
+	kv.mu.Lock()
+	_, ok := kv.dataSet[key]
+	kv.mu.Unlock()
+	if ok {
+		kv.dataSet[key] = val
+	} else {
+		kv.dataSet[key] = val
+	}
+
+	return _err, _val
+
+}
+
+func (kv *KVServer) ConcreteAppend(key string, val string) (Err, string) {
+	var _err Err
+	var _val string
+
+	kv.mu.Lock()
+	_, ok := kv.dataSet[key]
+	kv.mu.Unlock()
+	if ok {
+		kv.dataSet[key] += val
+	} else {
+		kv.dataSet[key] = val
+	}
+
+	return _err, _val
+
+}
+
+func (kv *KVServer) ApplyToServer() {
+	for {
+		_commandToApply := <-kv.applyCh
+		_operation := reflect.ValueOf(_commandToApply.Command)
+		_op := _operation.FieldByName("Operation").String()
+		_key := _operation.FieldByName("Key").String()
+		_value := _operation.FieldByName("Value").String()
+
+		_index := int(reflect.ValueOf(_commandToApply.CommandIndex).Int())
+
+		var _notice Notice
+		_notice.index = _index
+
+		var _err Err
+		var _val string
+
+		switch _op {
+		case GET:
+			_err, _val = kv.ConcreteGet(_key)
+		case PUT:
+			_err, _val = kv.ConcretePut(_key, _value)
+		case APPEND:
+			_err, _val = kv.ConcreteAppend(_key, _value)
+		}
+
+		_notice.err = _err
+		_notice.val = _val
+
+		Drop(kv.notification)
+		kv.notification <- _notice
+	}
 }
 
 //
@@ -84,6 +237,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.dataSet = make(map[string]string)
+	kv.notification = make(chan Notice, 1)
+
+	go kv.ApplyToServer()
 
 	return kv
 }
