@@ -427,7 +427,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				success = true
 				if args.Entries != nil {
 					index := args.PrevLogIndex
-					for i := 0; i < len(rf.logOfRaft); i++ {
+					for i := 0; i < len(args.Entries); i++ {
 						index += 1
 						if index > rf.getLastLogIndex() {
 							rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
@@ -437,6 +437,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 							DPrintf(" Term not equal, Server(%v=>%v), prevIndex=%v, index=%v", args.LeaderId, rf.me, args.PrevLogIndex, index)
 							rf.logOfRaft = rf.logOfRaft[:index]
 							rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
+							break
 						}
 					}
 				}
