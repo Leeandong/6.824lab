@@ -1,12 +1,13 @@
 package raftkv
 
 import (
+	"bytes"
 	"labgob"
 	"labrpc"
 	"log"
 	"raft"
-	"reflect"
 	"sync"
+	"time"
 )
 
 const Debug = 0
@@ -35,9 +36,11 @@ type Op struct {
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 
-	Operation string
-	Key       string
-	Value     string
+	Operation  string
+	Key        string
+	Value      string
+	SequenceId int64
+	CkId       int64
 }
 
 type KVServer struct {
@@ -50,64 +53,73 @@ type KVServer struct {
 
 	// Your definitions here.
 
-	dataSet      map[string]string
-	applyIndex   int
-	notification chan Notice
+	dataSet    map[string]string
+	commandSet map[int64]int64
+	result     map[int]chan Op
+
+	//index      int   //记录当前所受到的最高的 apply index 的编号
 }
 
-func Drop(noticeChan chan Notice) {
+func dropAndSend(ch chan Op, operation Op) {
 	select {
-	case <-noticeChan:
+	case <-ch:
 	default:
 	}
+	ch <- operation
+}
+
+func (kv *KVServer) AppendEntryToLog(command Op) bool {
+	index, _, ok := kv.rf.Start(command)
+
+	if ok == false {
+		return false
+	}
+
+	DPrintf(" kvServer put command[%v] (%v) to server %v", index, command, kv.me)
+
+	kv.mu.Lock()
+	kv.result[index] = make(chan Op, 1)
+	kv.mu.Unlock()
+
+	select {
+	case <-time.After(time.Second):
+		return false
+	case r := <-kv.result[index]:
+		return r == command
+	}
+
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+
 	// Your code here.
+	command := Op{GET, args.Key, "", args.RequestId, args.CkId}
 
-	command := Op{GET, args.Key, ""}
-
-	index, _, ok := kv.rf.Start(command)
-	DPrintf(" the rfserver(%v) start command success? %v", kv.me, ok)
-	if ok == false {
-		reply.WrongLeader = true
-		return
-	}
-
-	tmpNotice := <-kv.notification
-
-	if tmpNotice.index == index {
-		reply.Err = tmpNotice.err
-		reply.Value = tmpNotice.val
+	if kv.AppendEntryToLog(command) {
+		kv.mu.Lock()
+		val, ok := kv.dataSet[args.Key]
+		kv.mu.Unlock()
 		reply.WrongLeader = false
+		if ok {
+			reply.Value = val
+			reply.Err = OK
+		} else {
+			reply.Err = ErrNoKey
+		}
+	} else {
+		reply.WrongLeader = true
 	}
 
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-
-	_op := args.Op
-	_key := args.Key
-	_value := args.Value
-
-	command := Op{_op, _key, _value}
-
-	index, _, ok := kv.rf.Start(command)
-	DPrintf(" the rfserver(%v) start command success? %v", kv.me, ok)
-	if ok == false {
-		reply.WrongLeader = true
-		return
-	}
-
-	tmpNotice := <-kv.notification
-
-	//DPrintf( " %v get the notification and command index is %v, apply index is %v", kv.me, index, tmpNotice.index)
-
-	if tmpNotice.index == index {
-		//DPrintf( " %v reply %v is success ", kv.me, *reply)
-		reply.Err = tmpNotice.err
+	command := Op{args.Op, args.Key, args.Value, args.RequestId, args.CkId}
+	if kv.AppendEntryToLog(command) {
 		reply.WrongLeader = false
+		reply.Err = OK
+	} else {
+		reply.WrongLeader = true
 	}
 }
 
@@ -122,90 +134,97 @@ func (kv *KVServer) Kill() {
 	// Your code here, if desired.
 }
 
-func (kv *KVServer) ConcreteGet(key string) (Err, string) {
-
-	var _err Err = OK
-	var _val string
-
-	kv.mu.Lock()
-	val, ok := kv.dataSet[key]
-	kv.mu.Unlock()
-	if ok {
-		_val = val
-	} else {
-		_err = ErrNoKey
-	}
-
-	return _err, _val
-
-}
-
-func (kv *KVServer) ConcretePut(key string, val string) (Err, string) {
-
-	var _err Err = OK
-	var _val string
-
-	kv.mu.Lock()
-	_, ok := kv.dataSet[key]
-	kv.mu.Unlock()
-	if ok {
-		kv.dataSet[key] = val
-	} else {
-		kv.dataSet[key] = val
-	}
-
-	return _err, _val
-
-}
-
-func (kv *KVServer) ConcreteAppend(key string, val string) (Err, string) {
-	var _err Err = OK
-	var _val string
-
-	kv.mu.Lock()
-	_, ok := kv.dataSet[key]
-	kv.mu.Unlock()
-	if ok {
-		kv.dataSet[key] += val
-	} else {
-		kv.dataSet[key] = val
-	}
-
-	return _err, _val
-
-}
-
-func (kv *KVServer) ApplyToServer() {
+func (kv *KVServer) ApplyToServer(persister *raft.Persister) {
 	for {
 		_commandToApply := <-kv.applyCh
-		_operation := reflect.ValueOf(_commandToApply.Command)
-		_op := _operation.FieldByName("Operation").String()
-		_key := _operation.FieldByName("Key").String()
-		_value := _operation.FieldByName("Value").String()
+		_commandIndex := _commandToApply.CommandIndex
 
-		_index := int(reflect.ValueOf(_commandToApply.CommandIndex).Int())
+		kv.mu.Lock()
+		if _commandToApply.CommandValid == true {
+			_command := _commandToApply.Command.(Op)
+			//kv.mu.Lock()
+			val, ok := kv.commandSet[_command.CkId]
 
-		var _notice Notice
-		_notice.index = _index
+			if !ok || (ok && val < _command.SequenceId) {
+				kv.commandSet[_command.CkId] = _command.SequenceId
+				if _command.Operation == PUT {
+					kv.dataSet[_command.Key] = _command.Value
+				} else if _command.Operation == APPEND {
+					kv.dataSet[_command.Key] += _command.Value
+				} else {
 
-		var _err Err
-		var _val string
+				}
+			}
 
-		switch _op {
-		case GET:
-			_err, _val = kv.ConcreteGet(_key)
-		case PUT:
-			_err, _val = kv.ConcretePut(_key, _value)
-		case APPEND:
-			_err, _val = kv.ConcreteAppend(_key, _value)
+			ch, ok := kv.result[_commandIndex]
+			if ok { //如果这条通道已经被建立，也就是这个kvServer对应的是leader，才需要把信号发出去
+				dropAndSend(ch, _command)
+			}
+		} else {
+			_snapShot := _commandToApply.Snapshot
+			kv.readSnapShot(_snapShot)
 		}
+		kv.mu.Unlock()
 
-		_notice.err = _err
-		_notice.val = _val
-
-		Drop(kv.notification)
-		kv.notification <- _notice
+		if (kv.maxraftstate != -1) && (kv.maxraftstate < persister.RaftStateSize()) {
+			kv.mu.Lock()
+			_snapShot := kv.SnapShot()
+			kv.mu.Unlock()
+			DPrintf(" %v snapshot success", kv.me)
+			kv.rf.Lock()
+			kv.rf.WriteStateAndSnapShot(_snapShot, _commandIndex, -1)
+			kv.rf.Unlock()
+		}
 	}
+}
+
+//使用函数时需要加所锁
+func (kv *KVServer) SnapShot() []byte {
+
+	log.Printf("kv server %v install snapshot by itself", kv.me)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	err := e.Encode(kv.dataSet)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = e.Encode(kv.commandSet)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	data := w.Bytes()
+	return data
+}
+
+func (kv *KVServer) readSnapShot(data []byte) {
+	DPrintf(" kvServer %v read the snapshot", kv.me)
+
+	if data == nil || len(data) < 1 {
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var dataset map[string]string
+	var commandSet map[int64]int64
+
+	err := d.Decode(&dataset)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = d.Decode(&commandSet)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	kv.dataSet = dataset
+	kv.commandSet = commandSet
+
 }
 
 //
@@ -238,9 +257,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.dataSet = make(map[string]string)
-	kv.notification = make(chan Notice, 1)
+	kv.commandSet = make(map[int64]int64)
+	kv.result = make(map[int]chan Op)
 
-	go kv.ApplyToServer()
+	kv.mu.Lock()
+	kv.readSnapShot(persister.ReadSnapshot())
+	kv.mu.Unlock()
+
+	go kv.ApplyToServer(persister)
 
 	return kv
 }

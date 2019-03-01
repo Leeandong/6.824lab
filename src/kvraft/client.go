@@ -2,7 +2,7 @@ package raftkv
 
 import (
 	"labrpc"
-	"time"
+	"sync"
 )
 import "crypto/rand"
 import "math/big"
@@ -10,7 +10,10 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	currentLeader int
+	//currentLeader int
+	id        int64
+	requestID int64
+	mu        sync.Mutex
 }
 
 func nrand() int64 {
@@ -24,7 +27,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
-	ck.currentLeader = 0
+	//ck.currentLeader = 0
+	ck.id = nrand()
+	ck.requestID = 0
 	return ck
 }
 
@@ -43,31 +48,31 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
+	ck.mu.Lock()
+	ck.requestID += 1
+	ck.mu.Unlock()
 
-	r := ""
-	args := GetArgs{key}
+	args := GetArgs{key, ck.id, ck.requestID}
+	DPrintf(" clerk receive the request to get and args is %v and current kvservers are %v", args, ck.servers)
 	for {
-		reply := GetReply{}
-		if ok := ck.servers[ck.currentLeader].Call("KVServer.Get", &args, &reply); ok {
-			if reply.WrongLeader == true {
-				ck.currentLeader = (ck.currentLeader + 1) % len(ck.servers)
-				continue
-			}
-			DPrintf(" clerk get key(%v) from kvserver %v and the reply is %v, err IS %v", key, ck.currentLeader, reply.Value, reply.Err)
-			if reply.Err == ErrNoKey {
-				r = ""
-				break
-			} else if reply.Err == OK {
-				r = reply.Value
-				break
-			} else {
-				DPrintf(" Error%v occurs in get ", reply.Err)
-				continue
+		for _, v := range ck.servers {
+			reply := GetReply{}
+			ok := v.Call("KVServer.Get", &args, &reply)
+			if ok && reply.WrongLeader == false {
+				DPrintf(" clerk get key(%v) and the reply is %v, err is %v", key, reply.Value, reply.Err)
+
+				if reply.Err == ErrNoKey {
+					return ""
+				} else if reply.Err == OK {
+					return reply.Value
+				} else {
+					DPrintf(" Error(%v) occurs in get ", reply.Err)
+
+				}
 			}
 		}
 	}
 
-	return r
 }
 
 //
@@ -82,30 +87,32 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	args := PutAppendArgs{key, value, op}
-	//reply := PutAppendReply{}
-	for {
-		reply := PutAppendReply{} //这个东西换个位置为什么会有那么大的影响，传的是指针不本来就要变化的吗
-		ok := ck.servers[ck.currentLeader].Call("KVServer.PutAppend", &args, &reply)
-		if ok {
-			if reply.WrongLeader == true {
-				ck.currentLeader = (ck.currentLeader + 1) % len(ck.servers)
-				time.Sleep(10 * time.Millisecond)
-				continue
-			}
-			if op == PUT {
-				DPrintf(" clerk put value(%v) to key(%v) from kvserver %v and the reply err IS%v", value, key, ck.currentLeader, reply.Err)
-			} else if op == APPEND {
-				DPrintf(" clerk append value(%v) to key(%v) from kvserver %v and the reply err IS%v", value, key, ck.currentLeader, reply.Err)
-			} else {
-				DPrintf(" clerk get wrong putAppend op")
-			}
 
-			if reply.Err == OK {
-				break
-			} else {
-				DPrintf(" Error%v occurs in PutAppend ", reply.Err)
-				continue
+	ck.mu.Lock()
+	ck.requestID += 1
+	ck.mu.Unlock()
+
+	args := PutAppendArgs{key, value, op, ck.id, ck.requestID}
+	DPrintf(" clerk receive the request to PutAppend and args is %v", args)
+
+	for {
+		for _, v := range ck.servers {
+			reply := PutAppendReply{}
+			ok := v.Call("KVServer.PutAppend", &args, &reply)
+			if ok && reply.WrongLeader == false {
+				if op == PUT {
+					DPrintf(" clerk put value(%v) to key(%v) and the reply err is %v", value, key, reply.Err)
+				} else if op == APPEND {
+					DPrintf(" clerk append value(%v) to key(%v) and the reply err is %v", value, key, reply.Err)
+				} else {
+					DPrintf(" clerk get wrong putAppend op")
+				}
+
+				if reply.Err == OK {
+					return
+				} else {
+					DPrintf(" Error(%v) occurs in put", reply.Err)
+				}
 			}
 		}
 	}
