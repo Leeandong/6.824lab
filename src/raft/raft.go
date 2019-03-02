@@ -119,6 +119,7 @@ type Raft struct {
 
 // return currentTerm and whether this server
 // believes it is the leader.
+
 func (rf *Raft) GetState() (int, bool) {
 
 	var term int
@@ -340,7 +341,7 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.mu.Lock()
 	//defer rf.mu.Unlock()
 
-	DPrintf(" verify lock rf %v was installsnapshot by rf %v", rf.me, args.LeaderId)
+	//DPrintf(" verify lock rf %v was installsnapshot by rf %v", rf.me, args.LeaderId)
 	reply.Term = rf.currentTerm
 
 	if rf.currentTerm < args.Term {
@@ -350,6 +351,8 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.state = Follower
 		dropAndSet(rf.appendEntryCh)
 		rf.WriteStateAndSnapShot(args.Data, args.LastIncludeIndex, args.LastIncludeTerm)
+		rf.commitIndex = args.LastIncludeIndex
+		rf.applyLogs()
 		rf.mu.Unlock()
 		msg := ApplyMsg{CommandValid: false, Snapshot: args.Data}
 		rf.applyCh <- msg
@@ -526,6 +529,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	conflictTerm := rf.logOfRaft[0].Term
 
 	DPrintf(" before recieve %v entry, %v's log is %v, the args is %v", args.LeaderId, rf.me, rf.logOfRaft, *args)
+	log.Printf(" before recieve %v entry, %v's log is %v, the args is %v", args.LeaderId, rf.me, rf.logOfRaft, *args)
+
 	if args.Term > rf.currentTerm {
 		rf.convertToFollower(args.Term)
 	}
@@ -582,6 +587,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	DPrintf(" after recieve %v entry, %v's log is %v\n", args.LeaderId, rf.me, rf.logOfRaft)
+	log.Printf(" after recieve %v entry, %v's log is %v\n", args.LeaderId, rf.me, rf.logOfRaft)
 
 	reply.Term = rf.currentTerm
 	reply.Success = success
@@ -761,7 +767,7 @@ func (rf *Raft) startInstallSnapshots(idx int) bool {
 		} else {
 			rf.matchIndex[idx] = args.LastIncludeIndex
 			rf.nextIndex[idx] = rf.matchIndex[idx] + 1
-			rf.advanceCommitIndex()
+			//rf.advanceCommitIndex()   //之前commit过了才会给你install，没必要
 			return true
 		}
 	}
@@ -785,7 +791,6 @@ func (rf *Raft) startAppendEntries() {
 				//nextIndex := rf.nextIndex[idx]
 
 				if rf.nextIndex[idx] <= rf.logOfRaft[0].Index {
-					log.Printf("come here")
 					if !rf.startInstallSnapshots(idx) {
 						rf.mu.Unlock()
 						return
@@ -916,13 +921,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	log.Printf(" %v is start, its currentTerm is %v, votefor is %v, log is %v", rf.me, rf.currentTerm, rf.voteFor, rf.logOfRaft)
+
 	go func() {
 		for {
 			DPrintf(" %v is alive and its state is %v", rf.me, rf.state)
 			select {
 			case <-rf.exitCh:
 				DPrintf(" Exit Server(%v)", rf.me)
-				break
+				log.Printf(" Exit Server(%v)", rf.me)
+				return
+
+				//break
 			default:
 			}
 			electionTimeout := GetRandomElectionTimeout()
