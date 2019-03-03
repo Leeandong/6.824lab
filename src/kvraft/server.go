@@ -79,12 +79,13 @@ func (kv *KVServer) AppendEntryToLog(command Op) bool {
 
 	kv.mu.Lock()
 	kv.result[index] = make(chan Op, 1)
+	chanMsg := kv.result[index]
 	kv.mu.Unlock()
 
 	select {
 	case <-time.After(time.Second):
 		return false
-	case r := <-kv.result[index]:
+	case r := <-chanMsg:
 		return r == command
 	}
 
@@ -171,9 +172,9 @@ func (kv *KVServer) ApplyToServer(persister *raft.Persister) {
 			_snapShot := kv.SnapShot()
 			kv.mu.Unlock()
 			DPrintf(" %v snapshot success", kv.me)
-			kv.rf.Lock()
+			//kv.rf.Lock()
 			kv.rf.WriteStateAndSnapShot(_snapShot, _commandIndex, -1)
-			kv.rf.Unlock()
+			//kv.rf.Unlock()
 		}
 	}
 }
