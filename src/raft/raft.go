@@ -355,7 +355,7 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.WriteStateAndSnapShot(args.Data, args.LastIncludeIndex, args.LastIncludeTerm)
 		//rf.commitIndex = args.LastIncludeIndex  没有必要此时再去apply了
 		//rf.applyLogs()
-		msg := ApplyMsg{CommandValid: false, Snapshot: args.Data}
+		msg := ApplyMsg{CommandValid: false, Snapshot: args.Data, CommandIndex: args.LastIncludeIndex}
 		rf.applyCh <- msg
 	} else {
 		rf.mu.Unlock()
@@ -377,6 +377,7 @@ func (rf *Raft) sendInstallSnapShot(server int, args *InstallSnapshotArgs, reply
 func (rf *Raft) WriteStateAndSnapShot(snapshotData []byte, index int, term int) {
 	rf.mu.Lock()
 	log.Printf(" rf %v getLastLogIndex() is %v\t, index is %v", rf.me, rf.getLastLogIndex(), index)
+	log.Printf(" %v's log range is %v to %v", rf.me, rf.logOfRaft[0].Index, rf.getLastLogIndex())
 	if rf.getLastLogIndex() < index {
 		//该循环只有 installSnapshot 调用才会进入
 		rf.logOfRaft = rf.logOfRaft[0:0]
@@ -385,8 +386,14 @@ func (rf *Raft) WriteStateAndSnapShot(snapshotData []byte, index int, term int) 
 			log.Fatal(" term can't be -1 ")
 		}
 	} else {
+		// 自己
+		if rf.logOfRaft[0].Index <= index {
+			rf.logOfRaft = rf.logOfRaft[rf.getPosThroughIndex(index):]
+		} else {
+			rf.mu.Unlock()
+			return
+		}
 		// 普通的自己安装logOfRaft;
-		rf.logOfRaft = rf.logOfRaft[rf.getPosThroughIndex(index):]
 	}
 	log.Printf("after the snapshot,rf %v's log is %v", rf.me, rf.logOfRaft)
 	w := new(bytes.Buffer)
@@ -406,6 +413,8 @@ func (rf *Raft) WriteStateAndSnapShot(snapshotData []byte, index int, term int) 
 	stateData := w.Bytes()
 	rf.mu.Unlock()
 	rf.persister.SaveStateAndSnapshot(stateData, snapshotData)
+	//rf.mu.Unlock()
+
 }
 
 //
@@ -530,13 +539,14 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	reply.Term = rf.currentTerm
 
+	log.Printf(" before recieve %v entry, %v's log is %v, the args is %v", args.LeaderId, rf.me, rf.logOfRaft, args)
+
 	success := false
 	conflictIndex := rf.logOfRaft[0].Index + 1 //我希望得到的下一个log的index
 	//第一个一定是对的，就算做了快照，第一个也因为commit过才能能被快照的。
 	//conflictTerm := rf.logOfRaft[0].Term
 
 	DPrintf(" before recieve %v entry, %v's log is %v, the args is %v", args.LeaderId, rf.me, rf.logOfRaft, args)
-	log.Printf(" before recieve %v entry, %v's log is %v, the args is %v", args.LeaderId, rf.me, rf.logOfRaft, args)
 
 	if args.Term > rf.currentTerm {
 		rf.convertToFollower(args.Term)
@@ -549,43 +559,98 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			conflictIndex = rf.getLastLogIndex() + 1 //confilictIndex 是期望的下一个command的index, 之前的仍然有可能是全对的。
 			//conflictTerm = rf.logOfRaft[0].Term
 		} else {
-			prevLogTerm := rf.getIndexLogTerm(args.PrevLogIndex)
-			if prevLogTerm != args.PrevLogTerm {
-				//conflictTerm = prevLogTerm
-				for i := 1; i < len(rf.logOfRaft); i++ {
-					if rf.logOfRaft[i].Term == prevLogTerm {
-						conflictIndex = rf.getIndexThroughPos(i)
-						break
-					}
-				}
-				//rf.logOfRaft = rf.logOfRaft[:args.PrevLogIndex]
-				rf.logOfRaft = rf.logOfRaft[:rf.getPosThroughIndex(args.PrevLogIndex)]
-			} else {
+			if args.PrevLogIndex < rf.logOfRaft[0].Index {
 				success = true
 				if args.Entries != nil {
 					index := args.PrevLogIndex
 					for i := 0; i < len(args.Entries); i++ {
 						index += 1
-						if index > rf.getLastLogIndex() {
-							rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
+						if index > rf.logOfRaft[0].Index {
+							if index > rf.getLastLogIndex() {
+								rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
+								break
+							}
+							if rf.getIndexLogTerm(index) != args.Entries[i].Term {
+								DPrintf(" Term not equal, Server(%v=>%v), prevIndex=%v, index=%v", args.LeaderId, rf.me, args.PrevLogIndex, index)
+								rf.logOfRaft = rf.logOfRaft[:rf.getPosThroughIndex(index)]
+								rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
+								break
+							}
+						}
+					}
+				}
+
+			} else {
+				prevLogTerm := rf.getIndexLogTerm(args.PrevLogIndex)
+				if prevLogTerm != args.PrevLogTerm {
+					//conflictTerm = prevLogTerm
+					for i := 1; i < len(rf.logOfRaft); i++ {
+						if rf.logOfRaft[i].Term == prevLogTerm {
+							conflictIndex = rf.getIndexThroughPos(i)
 							break
 						}
-						//if rf.logOfRaft[index].Term != args.Entries[i].Term {
-						//	DPrintf(" Term not equal, Server(%v=>%v), prevIndex=%v, index=%v", args.LeaderId, rf.me, args.PrevLogIndex, index)
-						//	rf.logOfRaft = rf.logOfRaft[:index]
-						//	rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
-						//	break
-						//}
-						if rf.getIndexLogTerm(index) != args.Entries[i].Term {
-							DPrintf(" Term not equal, Server(%v=>%v), prevIndex=%v, index=%v", args.LeaderId, rf.me, args.PrevLogIndex, index)
-							rf.logOfRaft = rf.logOfRaft[:rf.getPosThroughIndex(index)]
-							rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
-							break
+					}
+					//rf.logOfRaft = rf.logOfRaft[:args.PrevLogIndex]
+					rf.logOfRaft = rf.logOfRaft[:rf.getPosThroughIndex(args.PrevLogIndex)]
+				} else {
+					success = true
+					if args.Entries != nil {
+						index := args.PrevLogIndex
+						for i := 0; i < len(args.Entries); i++ {
+							index += 1
+							if index > rf.getLastLogIndex() {
+								rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
+								break
+							}
+							//if rf.logOfRaft[index].Term != args.Entries[i].Term {
+							//	DPrintf(" Term not equal, Server(%v=>%v), prevIndex=%v, index=%v", args.LeaderId, rf.me, args.PrevLogIndex, index)
+							//	rf.logOfRaft = rf.logOfRaft[:index]
+							//	rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
+							//	break
+							//}
+							if rf.getIndexLogTerm(index) != args.Entries[i].Term {
+								DPrintf(" Term not equal, Server(%v=>%v), prevIndex=%v, index=%v", args.LeaderId, rf.me, args.PrevLogIndex, index)
+								rf.logOfRaft = rf.logOfRaft[:rf.getPosThroughIndex(index)]
+								rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
+								break
+							}
 						}
 					}
 				}
 
 			}
+
+			//prevLogTerm := rf.getIndexLogTerm(args.PrevLogIndex)
+
+			//if prevLogTerm != args.PrevLogTerm {
+			//	//conflictTerm = prevLogTerm
+			//	for i := 1; i < len(rf.logOfRaft); i++ {
+			//		if rf.logOfRaft[i].Term == prevLogTerm {
+			//			conflictIndex = rf.getIndexThroughPos(i)
+			//			break
+			//		}
+			//	}
+			//	rf.logOfRaft = rf.logOfRaft[:rf.getPosThroughIndex(args.PrevLogIndex)]
+			//} else {
+			//	success = true
+			//	if args.Entries != nil {
+			//		index := args.PrevLogIndex
+			//		for i := 0; i < len(args.Entries); i++ {
+			//			index += 1
+			//			if index > rf.getLastLogIndex() {
+			//				rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
+			//				break
+			//			}
+			//			if rf.getIndexLogTerm(index) != args.Entries[i].Term {
+			//				DPrintf(" Term not equal, Server(%v=>%v), prevIndex=%v, index=%v", args.LeaderId, rf.me, args.PrevLogIndex, index)
+			//				rf.logOfRaft = rf.logOfRaft[:rf.getPosThroughIndex(index)]
+			//				rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
+			//				break
+			//			}
+			//		}
+			//	}
+			//
+			//}
 		}
 
 	}
@@ -594,9 +659,9 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		rf.commitIndex = intMin(args.LeaderCommit, rf.getLastLogIndex())
 		log.Printf("%v need to advance commit, now the commit index is %v, the last apply index is %v", rf.me, rf.commitIndex, rf.lastApplied)
 		rf.mu.Unlock()
-		go func() {
-			rf.applyLogs()
-		}()
+		//go func() {
+		rf.applyLogs()
+		//}()
 	} else {
 		rf.mu.Unlock()
 	}
