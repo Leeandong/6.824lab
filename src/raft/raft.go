@@ -335,9 +335,9 @@ type InstallSnapshotReply struct {
 	Term int
 }
 
-func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+func (rf *Raft) InstallSnapShot(args InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	DPrintf(" rf %v was installsnapshot by rf %v", rf.me, args.LeaderId)
-	log.Printf(" rf %v was installsnapshot by rf %v", rf.me, args.LeaderId)
+	log.Printf(" rf %v was installsnapshot by rf %v, and the args is %v", rf.me, args.LeaderId, args)
 
 	rf.mu.Lock()
 	//defer rf.mu.Unlock()
@@ -353,8 +353,6 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		dropAndSet(rf.appendEntryCh)
 		rf.mu.Unlock()
 		rf.WriteStateAndSnapShot(args.Data, args.LastIncludeIndex, args.LastIncludeTerm)
-		//rf.commitIndex = args.LastIncludeIndex  没有必要此时再去apply了
-		//rf.applyLogs()
 		msg := ApplyMsg{CommandValid: false, Snapshot: args.Data, CommandIndex: args.LastIncludeIndex}
 		rf.applyCh <- msg
 	} else {
@@ -362,7 +360,7 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 }
 
-func (rf *Raft) sendInstallSnapShot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+func (rf *Raft) sendInstallSnapShot(server int, args InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
 	//filename := strconv.Itoa(args.CandidateId) + ".log"
 	//file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	//if err != nil {
@@ -378,23 +376,21 @@ func (rf *Raft) WriteStateAndSnapShot(snapshotData []byte, index int, term int) 
 	rf.mu.Lock()
 	log.Printf(" rf %v getLastLogIndex() is %v\t, index is %v", rf.me, rf.getLastLogIndex(), index)
 	log.Printf(" %v's log range is %v to %v", rf.me, rf.logOfRaft[0].Index, rf.getLastLogIndex())
-	if rf.getLastLogIndex() < index {
-		//该循环只有 installSnapshot 调用才会进入
-		rf.logOfRaft = rf.logOfRaft[0:0]
-		rf.logOfRaft = append(rf.logOfRaft, LogOfRaft{Index: index, Term: term})
-		if term == -1 {
-			log.Fatal(" term can't be -1 ")
-		}
-	} else {
-		// 自己
+	if term == -1 {
+		//自己调用
 		if rf.logOfRaft[0].Index <= index {
 			rf.logOfRaft = rf.logOfRaft[rf.getPosThroughIndex(index):]
 		} else {
+			//防止多个 install 造成冲突
 			rf.mu.Unlock()
 			return
 		}
-		// 普通的自己安装logOfRaft;
+	} else {
+		// installSnapshot 调用才会进入
+		rf.logOfRaft = rf.logOfRaft[0:0]
+		rf.logOfRaft = append(rf.logOfRaft, LogOfRaft{Index: index, Term: term})
 	}
+
 	log.Printf("after the snapshot,rf %v's log is %v", rf.me, rf.logOfRaft)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -413,8 +409,6 @@ func (rf *Raft) WriteStateAndSnapShot(snapshotData []byte, index int, term int) 
 	stateData := w.Bytes()
 	rf.mu.Unlock()
 	rf.persister.SaveStateAndSnapshot(stateData, snapshotData)
-	//rf.mu.Unlock()
-
 }
 
 //
@@ -660,14 +654,15 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		log.Printf("%v need to advance commit, now the commit index is %v, the last apply index is %v", rf.me, rf.commitIndex, rf.lastApplied)
 		rf.mu.Unlock()
 		//go func() {
+		log.Printf(" after recieve %v entry, %v's log is %v\n", args.LeaderId, rf.me, rf.logOfRaft)
 		rf.applyLogs()
 		//}()
 	} else {
+		log.Printf(" after recieve %v entry, %v's log is %v\n", args.LeaderId, rf.me, rf.logOfRaft)
 		rf.mu.Unlock()
 	}
 
 	DPrintf(" after recieve %v entry, %v's log is %v\n", args.LeaderId, rf.me, rf.logOfRaft)
-	log.Printf(" after recieve %v entry, %v's log is %v\n", args.LeaderId, rf.me, rf.logOfRaft)
 
 	reply.Success = success
 	reply.ConflictIndex = conflictIndex
@@ -846,7 +841,7 @@ func (rf *Raft) leaderElection() {
 }
 
 func (rf *Raft) startInstallSnapshots(idx int) bool {
-	args := &InstallSnapshotArgs{
+	args := InstallSnapshotArgs{
 		rf.currentTerm,
 		rf.me,
 		rf.logOfRaft[0].Index,
@@ -949,6 +944,7 @@ func (rf *Raft) startAppendEntries() {
 					DPrintf(" in advance CommitIndex matchIndexes:%v, newCommitIndex:%v", matchIndex, newCommitIndex)
 
 					if newCommitIndex > rf.commitIndex {
+						log.Printf(" new commit index is %v, the matchindex is %v, sorted matchindex is %v", newCommitIndex, rf.matchIndex, matchIndex)
 						rf.commitIndex = newCommitIndex
 						rf.mu.Unlock()
 						rf.applyLogs()
