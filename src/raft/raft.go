@@ -441,16 +441,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 
 	DPrintf(" before %v 's request,%v 's votefor is %v", args.CandidateId, rf.me, rf.voteFor)
-	log.Printf(" before %v 's request,%v 's votefor is %v", args.CandidateId, rf.me, rf.voteFor)
+	//log.Printf(" before %v 's request,%v 's votefor is %v", args.CandidateId, rf.me, rf.voteFor)
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	DPrintf(" verify lock before %v 's request,%v 's votefor is %v", args.CandidateId, rf.me, rf.voteFor)
-	log.Printf(" verify lock before %v 's request,%v 's votefor is %v", args.CandidateId, rf.me, rf.voteFor)
+	log.Printf(" before %v 's request,%v 's votefor is %v", args.CandidateId, rf.me, rf.voteFor)
 
 	DPrintf(" %v's requesetvote args is %v, and the reciever %v currentTerm is %v", args.CandidateId, *args, rf.me, rf.currentTerm)
-	log.Printf(" %v's requesetvote args is %v, and the reciever %v currentTerm is %v", args.CandidateId, *args, rf.me, rf.currentTerm)
+	//log.Printf(" %v's requesetvote args is %v, and the reciever %v currentTerm is %v", args.CandidateId, *args, rf.me, rf.currentTerm)
 
 	// all servers
 	if rf.currentTerm < args.Term {
@@ -651,7 +650,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	if (rf.commitIndex < args.LeaderCommit) && (success == true) {
 		rf.commitIndex = intMin(args.LeaderCommit, rf.getLastLogIndex())
-		log.Printf("%v need to advance commit, now the commit index is %v, the last apply index is %v", rf.me, rf.commitIndex, rf.lastApplied)
+		//log.Printf("%v need to advance commit, now the commit index is %v, the last apply index is %v", rf.me, rf.commitIndex, rf.lastApplied)
 		rf.mu.Unlock()
 		//go func() {
 		log.Printf(" after recieve %v entry, %v's log is %v\n", args.LeaderId, rf.me, rf.logOfRaft)
@@ -701,24 +700,24 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	index := -1
 	term := -1
-	_, isLeader := rf.GetState()
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	//_, isLeader := rf.GetState()
+	isLeader := rf.state == Leader
 
 	// Your code here (2B).
 
 	if isLeader {
-		rf.mu.Lock()
-		//_commandIndex := len(rf.logOfRaft)
+		//rf.mu.Lock()
 		_commandIndex := rf.getLastLogIndex() + 1
 		rf.logOfRaft = append(rf.logOfRaft, LogOfRaft{_commandIndex, rf.currentTerm, command})
-		//for i := 0; i < len(rf.peers); i++ {
-		//	rf.nextIndex[i] = len(rf.logOfRaft)
-		//}
-		//index = len(rf.logOfRaft) - 1 //函数返回值
 		index = _commandIndex
 		term = rf.currentTerm //函数返回值
 		rf.persist()
 		DPrintf(" %v need to send command %v, and its index is %v", rf.me, command, index)
-		rf.mu.Unlock()
+		//rf.mu.Unlock()
 
 	}
 
@@ -745,6 +744,7 @@ func (rf *Raft) applyLogs() {
 			rf.lastApplied++
 			if rf.lastApplied > rf.logOfRaft[0].Index {
 				DPrintf(" Server(%v) applyLogs, commitIndex:%v, lastApplied:%v, command:%v", rf.me, rf.commitIndex, rf.lastApplied, rf.logOfRaft[rf.getPosThroughIndex(rf.lastApplied)].Command)
+
 				//entry := rf.logOfRaft[rf.lastApplied]
 				entry := rf.logOfRaft[rf.getPosThroughIndex(rf.lastApplied)]
 				msg := ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: entry.Index}
@@ -904,13 +904,11 @@ func (rf *Raft) startAppendEntries() {
 				reply := &AppendEntriesReply{}
 				rf.mu.Unlock()
 
-				log.Printf(" server %v send appendentries to %v", rf.me, idx)
-
 				ret := rf.sendAppendEntries(idx, args, reply)
 				if !ret { //发送失败我就不发了， 等待下一个心跳继续发送
 					return
 				}
-				log.Printf(" server %v send appendentries to %v and the reply is %v", rf.me, idx, reply)
+				//log.Printf(" server %v send appendentries to %v and the reply is %v", rf.me, idx, reply)
 				DPrintf(" server %v send appendentries to %v and the reply is %v", rf.me, idx, reply)
 
 				rf.mu.Lock()
@@ -944,7 +942,7 @@ func (rf *Raft) startAppendEntries() {
 					DPrintf(" in advance CommitIndex matchIndexes:%v, newCommitIndex:%v", matchIndex, newCommitIndex)
 
 					if newCommitIndex > rf.commitIndex {
-						log.Printf(" new commit index is %v, the matchindex is %v, sorted matchindex is %v", newCommitIndex, rf.matchIndex, matchIndex)
+						//log.Printf(" new commit index is %v, the matchindex is %v, sorted matchindex is %v", newCommitIndex, rf.matchIndex, matchIndex)
 						rf.commitIndex = newCommitIndex
 						rf.mu.Unlock()
 						rf.applyLogs()
