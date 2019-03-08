@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -149,14 +149,15 @@ func (kv *KVServer) ApplyToServer(persister *raft.Persister) {
 			if !ok || (ok && val < _command.SequenceId) {
 				kv.commandSet[_command.CkId] = _command.SequenceId
 				if _command.Operation == PUT {
+					DPrintf(" kv server(%v) is put %v as %v in its database", kv.me, _command.Key, _command.Value)
 					kv.dataSet[_command.Key] = _command.Value
 				} else if _command.Operation == APPEND {
+					DPrintf(" kv server(%v) is append %v  %v in its database", kv.me, _command.Key, _command.Value)
 					kv.dataSet[_command.Key] += _command.Value
 				} else {
 
 				}
 			}
-
 			ch, ok := kv.result[_commandIndex]
 			if ok { //如果这条通道已经被建立，也就是这个kvServer对应的是leader，才需要把信号发出去
 				dropAndSend(ch, _command)
@@ -168,13 +169,12 @@ func (kv *KVServer) ApplyToServer(persister *raft.Persister) {
 		kv.mu.Unlock()
 
 		if (kv.maxraftstate != -1) && (kv.maxraftstate < persister.RaftStateSize()) {
+			DPrintf("%v kv.maxraftstate is %v, persisiter.raftstatesize is %v, the _command index is %v", kv.me, kv.maxraftstate, persister.RaftStateSize(), _commandIndex)
 			kv.mu.Lock()
 			_snapShot := kv.SnapShot()
 			kv.mu.Unlock()
 			DPrintf(" %v snapshot success", kv.me)
-			//kv.rf.Lock()
-			kv.rf.WriteStateAndSnapShot(_snapShot, _commandIndex, -1)
-			//kv.rf.Unlock()
+			kv.rf.WriteStateAndSnapShotWithLock(_snapShot, _commandIndex, -1)
 		}
 	}
 }
