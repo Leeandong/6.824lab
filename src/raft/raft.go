@@ -340,9 +340,7 @@ func (rf *Raft) InstallSnapShot(args InstallSnapshotArgs, reply *InstallSnapshot
 	log.Printf(" rf %v was installsnapshot by rf %v, and the args is %v", rf.me, args.LeaderId, args)
 
 	rf.mu.Lock()
-	//defer rf.mu.Unlock()
 
-	//DPrintf(" verify lock rf %v was installsnapshot by rf %v", rf.me, args.LeaderId)
 	reply.Term = rf.currentTerm
 
 	if rf.currentTerm < args.Term {
@@ -351,8 +349,9 @@ func (rf *Raft) InstallSnapShot(args InstallSnapshotArgs, reply *InstallSnapshot
 	if rf.currentTerm == args.Term {
 		rf.state = Follower
 		dropAndSet(rf.appendEntryCh)
-		rf.mu.Unlock()
+		// rf.mu.Lock() 要把rf.writeStateAndSnapShot解锁，必须在这里连续执行
 		rf.WriteStateAndSnapShot(args.Data, args.LastIncludeIndex, args.LastIncludeTerm)
+		rf.mu.Unlock()
 		msg := ApplyMsg{CommandValid: false, Snapshot: args.Data, CommandIndex: args.LastIncludeIndex}
 		rf.applyCh <- msg
 	} else {
@@ -373,20 +372,69 @@ func (rf *Raft) sendInstallSnapShot(server int, args InstallSnapshotArgs, reply 
 }
 
 func (rf *Raft) WriteStateAndSnapShot(snapshotData []byte, index int, term int) {
+	//rf.mu.Lock()
+	log.Printf(" rf %v getLastLogIndex() is %v\t, index is %v", rf.me, rf.getLastLogIndex(), index)
+	log.Printf(" %v's log range is %v to %v", rf.me, rf.logOfRaft[0].Index, rf.getLastLogIndex())
+
+	if index <= rf.logOfRaft[0].Index { //如果index落后于我的index，则成功
+		//rf.mu.Unlock()
+		return
+	} else if index > rf.logOfRaft[0].Index && index <= rf.getLastLogIndex() {
+		//当index 在我的log中时，先做一下连续性检查，再加，防止我们再这个index的term不一样，就错误commit了。
+		if term == -1 || rf.logOfRaft[rf.getPosThroughIndex(index)].Term == term {
+			rf.logOfRaft = rf.logOfRaft[rf.getPosThroughIndex(index):]
+		} else {
+			rf.logOfRaft = rf.logOfRaft[0:0]
+			rf.logOfRaft = append(rf.logOfRaft, LogOfRaft{Index: index, Term: term})
+		}
+	} else {
+		if term == 0 {
+			log.Fatal("term can't be -1 here")
+		}
+		rf.logOfRaft = rf.logOfRaft[0:0]
+		rf.logOfRaft = append(rf.logOfRaft, LogOfRaft{Index: index, Term: term})
+	}
+
+	log.Printf("after the snapshot,rf %v's log is %v", rf.me, rf.logOfRaft)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	err := e.Encode(rf.currentTerm)
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = e.Encode(rf.voteFor)
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = e.Encode(rf.logOfRaft)
+	if err != nil {
+		log.Fatal(err)
+	}
+	stateData := w.Bytes()
+	//rf.mu.Unlock()
+	rf.persister.SaveStateAndSnapshot(stateData, snapshotData)
+}
+
+func (rf *Raft) WriteStateAndSnapShotWithLock(snapshotData []byte, index int, term int) {
 	rf.mu.Lock()
 	log.Printf(" rf %v getLastLogIndex() is %v\t, index is %v", rf.me, rf.getLastLogIndex(), index)
 	log.Printf(" %v's log range is %v to %v", rf.me, rf.logOfRaft[0].Index, rf.getLastLogIndex())
-	if term == -1 {
-		//自己调用
-		if rf.logOfRaft[0].Index <= index {
+
+	if index <= rf.logOfRaft[0].Index { //如果index落后于我的index，则成功
+		rf.mu.Unlock()
+		return
+	} else if index > rf.logOfRaft[0].Index && index <= rf.getLastLogIndex() {
+		//当index 在我的log中时，先做一下连续性检查，再加，防止我们再这个index的term不一样，就错误commit了。
+		if term == -1 || rf.logOfRaft[rf.getPosThroughIndex(index)].Term == term {
 			rf.logOfRaft = rf.logOfRaft[rf.getPosThroughIndex(index):]
 		} else {
-			//防止多个 install 造成冲突
-			rf.mu.Unlock()
-			return
+			rf.logOfRaft = rf.logOfRaft[0:0]
+			rf.logOfRaft = append(rf.logOfRaft, LogOfRaft{Index: index, Term: term})
 		}
 	} else {
-		// installSnapshot 调用才会进入
+		if term == 0 {
+			log.Fatal("term can't be -1 here")
+		}
 		rf.logOfRaft = rf.logOfRaft[0:0]
 		rf.logOfRaft = append(rf.logOfRaft, LogOfRaft{Index: index, Term: term})
 	}
@@ -740,12 +788,11 @@ func (rf *Raft) applyLogs() {
 	for {
 		rf.mu.Lock()
 		if rf.commitIndex > rf.lastApplied {
-			log.Printf("when apply logs, %v commitIndex is %v, lastapplied index is %v", rf.me, rf.commitIndex, rf.lastApplied)
+			//log.Printf("when apply logs, %v commitIndex is %v, lastapplied index is %v", rf.me, rf.commitIndex, rf.lastApplied)
 			rf.lastApplied++
 			if rf.lastApplied > rf.logOfRaft[0].Index {
 				DPrintf(" Server(%v) applyLogs, commitIndex:%v, lastApplied:%v, command:%v", rf.me, rf.commitIndex, rf.lastApplied, rf.logOfRaft[rf.getPosThroughIndex(rf.lastApplied)].Command)
-
-				//entry := rf.logOfRaft[rf.lastApplied]
+				//log.Printf("when apply logs, %v commitIndex is %v, lastapplied index is %v, and apply log will quit", rf.me, rf.commitIndex, rf.lastApplied)
 				entry := rf.logOfRaft[rf.getPosThroughIndex(rf.lastApplied)]
 				msg := ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: entry.Index}
 				rf.mu.Unlock()
@@ -754,7 +801,7 @@ func (rf *Raft) applyLogs() {
 				rf.mu.Unlock()
 			}
 		} else {
-			log.Printf("when apply logs, %v commitIndex is %v, lastapplied index is %v, and apply log will quit", rf.me, rf.commitIndex, rf.lastApplied)
+			//log.Printf("when apply logs, %v commitIndex is %v, lastapplied index is %v, and apply log will quit", rf.me, rf.commitIndex, rf.lastApplied)
 			rf.mu.Unlock()
 			break
 		}
