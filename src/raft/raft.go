@@ -411,52 +411,14 @@ func (rf *Raft) WriteStateAndSnapShot(snapshotData []byte, index int, term int) 
 		log.Fatal(err)
 	}
 	stateData := w.Bytes()
-	//rf.mu.Unlock()
 	rf.persister.SaveStateAndSnapshot(stateData, snapshotData)
+
 }
 
 func (rf *Raft) WriteStateAndSnapShotWithLock(snapshotData []byte, index int, term int) {
 	rf.mu.Lock()
-	log.Printf(" rf %v getLastLogIndex() is %v\t, index is %v", rf.me, rf.getLastLogIndex(), index)
-	log.Printf(" %v's log range is %v to %v", rf.me, rf.logOfRaft[0].Index, rf.getLastLogIndex())
-
-	if index <= rf.logOfRaft[0].Index { //如果index落后于我的index，则成功
-		rf.mu.Unlock()
-		return
-	} else if index > rf.logOfRaft[0].Index && index <= rf.getLastLogIndex() {
-		//当index 在我的log中时，先做一下连续性检查，再加，防止我们再这个index的term不一样，就错误commit了。
-		if term == -1 || rf.logOfRaft[rf.getPosThroughIndex(index)].Term == term {
-			rf.logOfRaft = rf.logOfRaft[rf.getPosThroughIndex(index):]
-		} else {
-			rf.logOfRaft = rf.logOfRaft[0:0]
-			rf.logOfRaft = append(rf.logOfRaft, LogOfRaft{Index: index, Term: term})
-		}
-	} else {
-		if term == 0 {
-			log.Fatal("term can't be -1 here")
-		}
-		rf.logOfRaft = rf.logOfRaft[0:0]
-		rf.logOfRaft = append(rf.logOfRaft, LogOfRaft{Index: index, Term: term})
-	}
-
-	log.Printf("after the snapshot,rf %v's log is %v", rf.me, rf.logOfRaft)
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	err := e.Encode(rf.currentTerm)
-	if err != nil {
-		log.Fatal(err)
-	}
-	err = e.Encode(rf.voteFor)
-	if err != nil {
-		log.Fatal(err)
-	}
-	err = e.Encode(rf.logOfRaft)
-	if err != nil {
-		log.Fatal(err)
-	}
-	stateData := w.Bytes()
+	rf.WriteStateAndSnapShot(snapshotData, index, term)
 	rf.mu.Unlock()
-	rf.persister.SaveStateAndSnapshot(stateData, snapshotData)
 }
 
 //
@@ -598,7 +560,6 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		dropAndSet(rf.appendEntryCh)
 		if rf.getLastLogIndex() < args.PrevLogIndex {
 			conflictIndex = rf.getLastLogIndex() + 1 //confilictIndex 是期望的下一个command的index, 之前的仍然有可能是全对的。
-			//conflictTerm = rf.logOfRaft[0].Term
 		} else {
 			if args.PrevLogIndex < rf.logOfRaft[0].Index {
 				success = true
@@ -624,14 +585,12 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			} else {
 				prevLogTerm := rf.getIndexLogTerm(args.PrevLogIndex)
 				if prevLogTerm != args.PrevLogTerm {
-					//conflictTerm = prevLogTerm
 					for i := 1; i < len(rf.logOfRaft); i++ {
 						if rf.logOfRaft[i].Term == prevLogTerm {
 							conflictIndex = rf.getIndexThroughPos(i)
 							break
 						}
 					}
-					//rf.logOfRaft = rf.logOfRaft[:args.PrevLogIndex]
 					rf.logOfRaft = rf.logOfRaft[:rf.getPosThroughIndex(args.PrevLogIndex)]
 				} else {
 					success = true
@@ -643,12 +602,6 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 								rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
 								break
 							}
-							//if rf.logOfRaft[index].Term != args.Entries[i].Term {
-							//	DPrintf(" Term not equal, Server(%v=>%v), prevIndex=%v, index=%v", args.LeaderId, rf.me, args.PrevLogIndex, index)
-							//	rf.logOfRaft = rf.logOfRaft[:index]
-							//	rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
-							//	break
-							//}
 							if rf.getIndexLogTerm(index) != args.Entries[i].Term {
 								DPrintf(" Term not equal, Server(%v=>%v), prevIndex=%v, index=%v", args.LeaderId, rf.me, args.PrevLogIndex, index)
 								rf.logOfRaft = rf.logOfRaft[:rf.getPosThroughIndex(index)]
@@ -661,49 +614,15 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 			}
 
-			//prevLogTerm := rf.getIndexLogTerm(args.PrevLogIndex)
-
-			//if prevLogTerm != args.PrevLogTerm {
-			//	//conflictTerm = prevLogTerm
-			//	for i := 1; i < len(rf.logOfRaft); i++ {
-			//		if rf.logOfRaft[i].Term == prevLogTerm {
-			//			conflictIndex = rf.getIndexThroughPos(i)
-			//			break
-			//		}
-			//	}
-			//	rf.logOfRaft = rf.logOfRaft[:rf.getPosThroughIndex(args.PrevLogIndex)]
-			//} else {
-			//	success = true
-			//	if args.Entries != nil {
-			//		index := args.PrevLogIndex
-			//		for i := 0; i < len(args.Entries); i++ {
-			//			index += 1
-			//			if index > rf.getLastLogIndex() {
-			//				rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
-			//				break
-			//			}
-			//			if rf.getIndexLogTerm(index) != args.Entries[i].Term {
-			//				DPrintf(" Term not equal, Server(%v=>%v), prevIndex=%v, index=%v", args.LeaderId, rf.me, args.PrevLogIndex, index)
-			//				rf.logOfRaft = rf.logOfRaft[:rf.getPosThroughIndex(index)]
-			//				rf.logOfRaft = append(rf.logOfRaft, args.Entries[i:]...)
-			//				break
-			//			}
-			//		}
-			//	}
-			//
-			//}
 		}
 
 	}
 
 	if (rf.commitIndex < args.LeaderCommit) && (success == true) {
 		rf.commitIndex = intMin(args.LeaderCommit, rf.getLastLogIndex())
-		//log.Printf("%v need to advance commit, now the commit index is %v, the last apply index is %v", rf.me, rf.commitIndex, rf.lastApplied)
 		rf.mu.Unlock()
-		//go func() {
 		log.Printf(" after recieve %v entry, %v's log is %v\n", args.LeaderId, rf.me, rf.logOfRaft)
 		rf.applyLogs()
-		//}()
 	} else {
 		log.Printf(" after recieve %v entry, %v's log is %v\n", args.LeaderId, rf.me, rf.logOfRaft)
 		rf.mu.Unlock()
@@ -713,7 +632,6 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	reply.Success = success
 	reply.ConflictIndex = conflictIndex
-	//reply.ConflictTerm = conflictTerm
 	return
 
 }
@@ -998,17 +916,6 @@ func (rf *Raft) startAppendEntries() {
 					}
 					return
 				} else {
-					//newIndex := reply.ConflictIndex
-					//for i := 1; i < len(rf.logOfRaft); i++ {
-					//	entry := rf.logOfRaft[i]
-					//	if entry.Term == reply.ConflictTerm {
-					//		//newIndex = i + 1
-					//		newIndex = rf.getIndexThroughPos(i + 1)
-					//		//如果接受者和发送者都有某个term的第一个entry，那么这个entry一定是一样的
-					//		//并且如果term 是 0的话，刚好掠过了第一个
-					//	}
-					//}
-
 					if reply.ConflictIndex == 0 {
 						DPrintf("when %v is leader, %v' reply", rf.me, idx)
 						log.Fatal("newIndex can't be 0")
@@ -1067,7 +974,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	log.Printf(" %v is start, its currentTerm is %v, votefor is %v, log is %v", rf.me, rf.currentTerm, rf.voteFor, rf.logOfRaft)
+	//log.Printf(" %v is start, its currentTerm is %v, votefor is %v, log is %v", rf.me, rf.currentTerm, rf.voteFor, rf.logOfRaft)
 
 	go func() {
 		for {
