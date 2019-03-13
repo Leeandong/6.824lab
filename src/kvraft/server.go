@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -24,12 +24,6 @@ const (
 	APPEND = "Append"
 	PUT    = "Put"
 )
-
-type Notice struct {
-	index int
-	err   Err
-	val   string
-}
 
 type Op struct {
 	// Your definitions here.
@@ -141,7 +135,8 @@ func (kv *KVServer) ApplyToServer(persister *raft.Persister) {
 		_commandIndex := _commandToApply.CommandIndex
 
 		kv.mu.Lock()
-		if _commandToApply.CommandValid == true {
+
+		if _commandToApply.CommandValid == true && _commandToApply.Command != nil {
 			_command := _commandToApply.Command.(Op)
 			//kv.mu.Lock()
 			val, ok := kv.commandSet[_command.CkId]
@@ -162,20 +157,26 @@ func (kv *KVServer) ApplyToServer(persister *raft.Persister) {
 			if ok { //如果这条通道已经被建立，也就是这个kvServer对应的是leader，才需要把信号发出去
 				dropAndSend(ch, _command)
 			}
-		} else {
+		} else if _commandToApply.CommandValid == false {
+			if _commandToApply.Snapshot == nil {
+				log.Fatal("snapshot can't be nil")
+			}
 			_snapShot := _commandToApply.Snapshot
 			kv.readSnapShot(_snapShot)
 		}
-		kv.mu.Unlock()
+
+		log.Printf("now %v's database is %v", kv.me, kv.dataSet)
 
 		if (kv.maxraftstate != -1) && (kv.maxraftstate < persister.RaftStateSize()) {
 			DPrintf("%v kv.maxraftstate is %v, persisiter.raftstatesize is %v, the _command index is %v", kv.me, kv.maxraftstate, persister.RaftStateSize(), _commandIndex)
-			kv.mu.Lock()
 			_snapShot := kv.SnapShot()
-			kv.mu.Unlock()
 			DPrintf(" %v snapshot success", kv.me)
-			kv.rf.WriteStateAndSnapShotWithLock(_snapShot, _commandIndex, -1)
+			go kv.rf.WriteStateAndSnapShotWithLock(_snapShot, _commandIndex, -1)
+
 		}
+
+		kv.mu.Unlock()
+
 	}
 }
 
@@ -261,9 +262,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.commandSet = make(map[int64]int64)
 	kv.result = make(map[int]chan Op)
 
-	kv.mu.Lock()
 	kv.readSnapShot(persister.ReadSnapshot())
-	kv.mu.Unlock()
 
 	go kv.ApplyToServer(persister)
 

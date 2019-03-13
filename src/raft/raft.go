@@ -215,6 +215,9 @@ func (rf *Raft) convertToLeader() {
 	log.Printf(" Convert server(%v) state(%v=>leader) term %v", rf.me,
 		rf.state.String(), rf.currentTerm)
 
+	_commandIndex := rf.getLastLogIndex() + 1
+	rf.logOfRaft = append(rf.logOfRaft, LogOfRaft{_commandIndex, rf.currentTerm, nil})
+
 	rf.state = Leader
 
 	for i := 0; i < len(rf.peers); i++ {
@@ -394,6 +397,9 @@ func (rf *Raft) WriteStateAndSnapShot(snapshotData []byte, index int, term int) 
 		rf.logOfRaft = rf.logOfRaft[0:0]
 		rf.logOfRaft = append(rf.logOfRaft, LogOfRaft{Index: index, Term: term})
 	}
+
+	rf.lastApplied = rf.logOfRaft[0].Index
+	//rf.applyLogs()
 
 	log.Printf("after the snapshot,rf %v's log is %v", rf.me, rf.logOfRaft)
 	w := new(bytes.Buffer)
@@ -710,7 +716,7 @@ func (rf *Raft) applyLogs() {
 			rf.lastApplied++
 			if rf.lastApplied > rf.logOfRaft[0].Index {
 				DPrintf(" Server(%v) applyLogs, commitIndex:%v, lastApplied:%v, command:%v", rf.me, rf.commitIndex, rf.lastApplied, rf.logOfRaft[rf.getPosThroughIndex(rf.lastApplied)].Command)
-				//log.Printf("when apply logs, %v commitIndex is %v, lastapplied index is %v, and apply log will quit", rf.me, rf.commitIndex, rf.lastApplied)
+				log.Printf("when apply logs, %v commitIndex is %v, lastapplied index is %v, and apply log will quit", rf.me, rf.commitIndex, rf.lastApplied)
 				entry := rf.logOfRaft[rf.getPosThroughIndex(rf.lastApplied)]
 				msg := ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: entry.Index}
 				rf.mu.Unlock()
